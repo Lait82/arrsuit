@@ -205,7 +205,7 @@ services:
   #   No publica puertos: no necesita bind.
   # -----------------------------------------------------------------------
   recyclarr:
-    image: ghcr.io/recyclarr/recyclarr:latest
+    image: ghcr.io/recyclarr/recyclarr:8
     container_name: recyclarr
     networks: [media]
     environment:

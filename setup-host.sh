@@ -179,8 +179,8 @@ fi
 log "4/7 nginx: colocando configs"
 # =========================================================================
 # Server block y headers de proxy
-install -m 0644 "$SCRIPT_DIR/nginx/jellyfin"            /etc/nginx/sites-available/jellyfin
-install -m 0644 "$SCRIPT_DIR/nginx/proxy_jellyfin.conf" /etc/nginx/proxy_jellyfin.conf
+install -m 0644 "$SCRIPT_DIR/configs/nginx/jellyfin"            /etc/nginx/sites-available/jellyfin
+install -m 0644 "$SCRIPT_DIR/configs/nginx/proxy_jellyfin.conf" /etc/nginx/proxy_jellyfin.conf
 
 # Habilitar el sitio y sacar el default
 ln -sf /etc/nginx/sites-available/jellyfin /etc/nginx/sites-enabled/jellyfin
@@ -191,7 +191,7 @@ if [[ "$GEO_ENABLED" -eq 1 ]]; then
     if ! grep -q "geoip2 .*GeoLite2-Country.mmdb" /etc/nginx/nginx.conf; then
         # Toma el snippet y le corrige la ruta a la DB detectada ($GEOIP_DB)
         GEO_SNIPPET="$(sed "s|geoip2 .*GeoLite2-Country.mmdb|geoip2 $GEOIP_DB|" \
-            "$SCRIPT_DIR/nginx/geoip2-snippet.conf" | sed 's/^/\t/')"
+            "$SCRIPT_DIR/configs/nginx/geoip2-snippet.conf" | sed 's/^/\t/')"
         awk -v snip="$GEO_SNIPPET" '
             /^http[[:space:]]*{/ && !done { print; print snip; done=1; next }
             { print }
@@ -221,8 +221,8 @@ fi
 # =========================================================================
 log "5/7 fail2ban: filtro y jail de Jellyfin"
 # =========================================================================
-install -m 0644 "$SCRIPT_DIR/fail2ban/jellyfin.conf"  /etc/fail2ban/filter.d/jellyfin.conf
-install -m 0644 "$SCRIPT_DIR/fail2ban/jellyfin.local" /etc/fail2ban/jail.d/jellyfin.local
+install -m 0644 "$SCRIPT_DIR/configs/fail2ban/jellyfin.conf"  /etc/fail2ban/filter.d/jellyfin.conf
+install -m 0644 "$SCRIPT_DIR/configs/fail2ban/jellyfin.local" /etc/fail2ban/jail.d/jellyfin.local
 
 # Validar el regex contra logs reales si existen
 JELLY_LOG="$(find /srv/config/jellyfin/log -maxdepth 1 -name '*.log' 2>/dev/null | head -n1 || true)"
