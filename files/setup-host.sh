@@ -18,6 +18,41 @@ log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
 die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 
+# spin "Mensaje" comando args...
+# Corre el comando en background con un spinner al lado. Preserva el exit code
+# y captura la salida; si el comando falla, la muestra antes de abortar.
+# Si no hay TTY (log a archivo, CI), corre el comando directo sin animacion.
+spin() {
+    local msg="$1"; shift
+    if [[ ! -t 1 ]]; then
+        echo "  $msg..."
+        "$@"
+        return $?
+    fi
+    local tmp; tmp="$(mktemp)"
+    "$@" >"$tmp" 2>&1 &
+    local pid=$!
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    # tput civis/cnorm: ocultar/mostrar cursor (si tput existe)
+    command -v tput >/dev/null && tput civis 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % ${#frames} ))
+        printf '\r  \033[1;36m%s\033[0m %s' "${frames:$i:1}" "$msg"
+        sleep 0.1
+    done
+    wait "$pid"; local rc=$?
+    command -v tput >/dev/null && tput cnorm 2>/dev/null || true
+    if [[ $rc -eq 0 ]]; then
+        printf '\r  \033[1;32m✓\033[0m %s\n' "$msg"
+    else
+        printf '\r  \033[1;31m✗\033[0m %s\n' "$msg"
+        cat "$tmp"
+    fi
+    rm -f "$tmp"
+    return $rc
+}
+
 [[ $EUID -eq 0 ]] || die "Corré con sudo."
 
 # =========================================================================
@@ -49,8 +84,11 @@ fi
 # =========================================================================
 log "1/7 Instalando paquetes"
 # =========================================================================
-apt-get update -qq
-apt-get install -y -qq \
+export DEBIAN_FRONTEND=noninteractive
+spin "Actualizando indice de paquetes (apt update)" \
+    apt-get update -qq
+spin "Instalando nginx, geoip, fail2ban, ufw" \
+    apt-get install -y -qq \
     nginx \
     libnginx-mod-http-geoip2 \
     geoipupdate \
@@ -61,8 +99,8 @@ apt-get install -y -qq \
 log "2/7 Tailscale: instalacion y autenticacion"
 # =========================================================================
 if ! command -v tailscale >/dev/null 2>&1; then
-    log "Instalando Tailscale..."
-    curl -fsSL https://tailscale.com/install.sh | sh
+    spin "Instalando Tailscale" \
+        bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
 else
     log "Tailscale ya instalado, se saltea."
 fi
@@ -90,10 +128,18 @@ TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
 [[ -n "$TAILSCALE_IP" ]] || die "No pude obtener la IP de Tailscale. ¿Autenticaste con 'tailscale up'?"
 log "IP de Tailscale detectada: $TAILSCALE_IP"
 
-# Chequeo de coherencia: avisar si el compose todavia tiene el placeholder
-if grep -rq "100.x.y.z" /srv 2>/dev/null; then
-    warn "Ojo: encontré '100.x.y.z' en /srv. Reemplazá el placeholder en el compose por $TAILSCALE_IP."
+# Persistir la IP en el .env para que docker-compose la lea como ${TAILSCALE_IP}.
+# Idempotente: reemplaza la linea si ya existe, la agrega si no.
+if grep -q '^TAILSCALE_IP=' "$ENV_FILE"; then
+    sed -i "s|^TAILSCALE_IP=.*|TAILSCALE_IP=$TAILSCALE_IP|" "$ENV_FILE"
+else
+    printf '\n# IP de Tailscale (escrita automaticamente por setup-host.sh)\nTAILSCALE_IP=%s\n' "$TAILSCALE_IP" >> "$ENV_FILE"
 fi
+log "IP escrita en $ENV_FILE (TAILSCALE_IP=$TAILSCALE_IP)"
+
+# El docker-compose.yml debe usar ${TAILSCALE_IP} en los binds de los *arr.
+# Recorda hacer 'docker compose up -d' desde la carpeta que tiene este .env,
+# o pasarle --env-file, para que la variable se resuelva.
 
 # =========================================================================
 log "3/7 GeoIP2: bajando base de datos de MaxMind"
@@ -104,7 +150,8 @@ AccountID $MAXMIND_ACCOUNT_ID
 LicenseKey $MAXMIND_LICENSE_KEY
 EditionIDs GeoLite2-Country
 EOF
-    geoipupdate || warn "geoipupdate fallo. Revisar credenciales de MaxMind."
+    spin "Descargando base de datos GeoLite2" \
+        geoipupdate || warn "geoipupdate fallo. Revisar credenciales de MaxMind."
 
     # Cron semanal para mantener la DB al dia
     cat > /etc/cron.weekly/geoipupdate <<'EOF'

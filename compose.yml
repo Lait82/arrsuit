@@ -8,11 +8,14 @@
 #
 #  BINDS DE SEGURIDAD:
 #    - Jellyfin: 127.0.0.1  -> solo lo alcanza nginx (que aplica geo + rate limit)
-#    - arr y paneles: 100.x.y.z (IP Tailscale) -> solo vos, por el tailnet
+#    - arr y paneles: ${TAILSCALE_IP} (IP Tailscale) -> solo vos, por el tailnet
 #    - qBittorrent WebUI: 127.0.0.1 -> por Tailscale via IP del host
 #    - Torrent (6881): sale por gluetun/ProtonVPN, no por la IP del VPS
 #
-#  >>> REEMPLAZA 100.x.y.z por tu IP de Tailscale (tailscale ip -4)
+#  La variable ${TAILSCALE_IP} la escribe setup-host.sh en el .env.
+#  Levanta el stack desde la carpeta que tiene el .env:
+#      docker compose up -d
+#  (o: docker compose --env-file /ruta/al/.env up -d)
 # =========================================================================
 
 services:
@@ -21,41 +24,20 @@ services:
   # Jellyfin - media server. UNICO expuesto, detras de nginx en el host.
   # Bindeado a localhost: solo nginx le llega.
   # -----------------------------------------------------------------------
-
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
     networks: [media]
-    restart: unless-stopped
     ports:
-      - "127.0.0.1:8096:8096"
+      - "127.0.0.1:8096:8096"   # solo nginx (reverse proxy en el host)
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=America/Argentina/Buenos_Aires
-      - JELLYFIN_PublishedServerUrl=http://194.238.30.202
     volumes:
       - /srv/config/jellyfin:/config
-      # media — MISMOS paths de siempre
-      - /srv/media/movies:/data/movies
-      - /srv/media/series:/data/series
-      - /srv/media/anime:/data/anime
-    security_opt:
-      - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          memory: 8G
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - /srv/media:/data
+    restart: unless-stopped
 
   # -----------------------------------------------------------------------
   # VPN: todo el trafico de qBittorrent sale por aca. Killswitch incluido.
@@ -114,7 +96,7 @@ services:
     container_name: prowlarr
     networks: [media]
     ports:
-      - "100.x.y.z:9696:9696"   # solo Tailscale
+      - "${TAILSCALE_IP}:9696:9696"   # solo Tailscale
     environment:
       - PUID=1000
       - PGID=1000
@@ -131,7 +113,7 @@ services:
     container_name: radarr
     networks: [media]
     ports:
-      - "100.x.y.z:7878:7878"   # solo Tailscale
+      - "${TAILSCALE_IP}:7878:7878"   # solo Tailscale
     environment:
       - PUID=1000
       - PGID=1000
@@ -149,7 +131,7 @@ services:
     container_name: sonarr
     networks: [media]
     ports:
-      - "100.x.y.z:8989:8989"   # solo Tailscale
+      - "${TAILSCALE_IP}:8989:8989"   # solo Tailscale
     environment:
       - PUID=1000
       - PGID=1000
@@ -167,7 +149,7 @@ services:
     container_name: bazarr
     networks: [media]
     ports:
-      - "100.x.y.z:6767:6767"   # solo Tailscale
+      - "${TAILSCALE_IP}:6767:6767"   # solo Tailscale
     environment:
       - PUID=1000
       - PGID=1000
@@ -185,7 +167,7 @@ services:
     container_name: jellyseerr
     networks: [media]
     ports:
-      - "100.x.y.z:5055:5055"   # solo Tailscale
+      - "${TAILSCALE_IP}:5055:5055"   # solo Tailscale
     environment:
       - TZ=America/Argentina/Buenos_Aires
     volumes:
@@ -200,8 +182,8 @@ services:
     container_name: tdarr
     networks: [media]
     ports:
-      - "100.x.y.z:8265:8265"   # WebUI - solo Tailscale
-      - "100.x.y.z:8266:8266"   # server port (nodos) - solo Tailscale
+      - "${TAILSCALE_IP}:8265:8265"   # WebUI - solo Tailscale
+      - "${TAILSCALE_IP}:8266:8266"   # server port (nodos) - solo Tailscale
     environment:
       - PUID=1000
       - PGID=1000
@@ -243,7 +225,7 @@ services:
     container_name: flaresolverr
     networks: [media]
     ports:
-      - "100.x.y.z:8191:8191"   # solo Tailscale (o borra: Prowlarr le pega por red interna)
+      - "${TAILSCALE_IP}:8191:8191"   # solo Tailscale (o borra: Prowlarr le pega por red interna)
     environment:
       - LOG_LEVEL=info
       - TZ=America/Argentina/Buenos_Aires
