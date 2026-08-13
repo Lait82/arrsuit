@@ -42,6 +42,9 @@ Tailscale y el puerto 80 (Jellyfin vía nginx).
 ```
 host-setup/
 ├── setup-host.sh              # script idempotente que instala y configura todo
+├── .env.example              # plantilla de variables (copiar a .env)
+├── .env                      # tus valores reales (NO versionado, lo creás vos)
+├── .gitignore                # excluye el .env del repo
 ├── nginx/
 │   ├── jellyfin               # server block: reverse proxy + geo + rate limit
 │   ├── proxy_jellyfin.conf    # headers de proxy compartidos (incl. WebSockets)
@@ -56,23 +59,44 @@ host-setup/
 
 ### 1. Prerequisitos
 
-- Tailscale ya instalado y andando en la VPS. Sacá tu IP con `tailscale ip -4`.
 - Cuenta gratis en [MaxMind](https://www.maxmind.com/en/geolite2/signup) para la
   base GeoLite2 (necesitás Account ID + License Key). Sin esto, el script se
   configura **sin** geo-bloqueo y avisa.
-- El `docker-compose.yml` con los binds correctos (Jellyfin en `127.0.0.1:8096`,
-  el resto en tu IP de Tailscale).
+- El `docker-compose.yml` con los binds. Ojo: dejá el placeholder `100.x.y.z` y
+  reemplazalo por la IP de Tailscale **después** de correr el script por primera
+  vez (el script te la muestra). O corré el script, anotá la IP que detecta, y
+  recién ahí hacés el find-replace en el compose y levantás los contenedores.
 
-### 2. Editar la config del script
+**Tailscale ya NO es prerequisito manual**: el script lo instala. Lo único que no
+puede hacer solo es la autenticación (necesitás abrir una URL en el navegador),
+así que la primera corrida va a frenar pidiéndote que corras `sudo tailscale up`
+y reintentes. La IP de Tailscale se deriva sola con `tailscale ip -4`; ya no la
+ponés a mano en ningún lado del script.
 
-Abrí `setup-host.sh` y completá la sección `CONFIG`:
+### 2. Configurar el `.env`
+
+Las variables y credenciales se leen de un archivo `.env` (no van hardcodeadas en
+el script). Copiá la plantilla y completala:
 
 ```bash
-TAILSCALE_IP="100.x.y.z"          # tu IP de Tailscale (tailscale ip -4)
-MAXMIND_ACCOUNT_ID="..."          # de tu cuenta MaxMind
-MAXMIND_LICENSE_KEY="..."         # de tu cuenta MaxMind
-SSH_PORT="22"                     # cambialo si usás otro
+cp .env.example .env
+nano .env
 ```
+
+Contenido:
+
+```bash
+MAXMIND_ACCOUNT_ID=...      # de tu cuenta MaxMind (vacío = sin geo-bloqueo)
+MAXMIND_LICENSE_KEY=...     # de tu cuenta MaxMind (vacío = sin geo-bloqueo)
+SSH_PORT=22                 # cambialo si usás otro
+```
+
+El `.env` real **no se versiona** (está en `.gitignore`); solo se commitea
+`.env.example`. Así no subís secretos a git. La IP de Tailscale no va en el `.env`:
+el script la deriva sola con `tailscale ip -4`.
+
+Si dejás las credenciales de MaxMind vacías, el script corre igual pero configura
+nginx **sin** geo-bloqueo (y te avisa).
 
 ### 3. Correr
 
@@ -85,14 +109,23 @@ El script es **idempotente**: podés correrlo de nuevo sin duplicar reglas ni
 romper nada. Qué hace, en orden:
 
 1. Instala nginx, geoipupdate, fail2ban, ufw.
-2. Baja la base de MaxMind y arma un cron semanal para mantenerla al día.
-3. Coloca las configs de nginx, inserta el bloque geoip2 en `nginx.conf`, valida
+2. **Instala Tailscale y lo levanta.** Si todavía no autenticaste, **frena acá**
+   y te pide correr `sudo tailscale up` (o `--ssh`) y reintentar — la auth es
+   interactiva y no se puede automatizar sin auth key. Una vez autenticado,
+   deriva la IP de Tailscale sola.
+3. Baja la base de MaxMind y arma un cron semanal para mantenerla al día.
+4. Coloca las configs de nginx, inserta el bloque geoip2 en `nginx.conf`, valida
    con `nginx -t` y recién ahí recarga. **Si `nginx -t` falla, no recarga.**
-4. Instala el filtro y jail de fail2ban, y valida el regex contra los logs reales
+5. Instala el filtro y jail de fail2ban, y valida el regex contra los logs reales
    si ya existen.
-5. Configura UFW **abriendo SSH y Tailscale ANTES** de activarlo (para no
-   lockearte), y lo activa.
-6. Imprime un checklist de verificaciones manuales.
+6. Configura UFW **abriendo SSH y Tailscale ANTES** de activarlo (para no
+   lockearte). Antes de tocar el firewall verifica que `tailscale0` exista; si no,
+   aborta para no dejarte afuera.
+7. Imprime un checklist de verificaciones manuales.
+
+Como la primera corrida frena en el paso 2 para que autentiques, en la práctica lo
+corrés **dos veces**: la primera instala Tailscale y para; autenticás; la segunda
+completa todo de una.
 
 ### 4. Orden recomendado la primera vez
 

@@ -6,25 +6,13 @@
 #  Idempotente: se puede correr varias veces.
 #  Correr con sudo desde la carpeta que contiene ./nginx y ./fail2ban.
 #
-#  >>> ANTES DE CORRER, editar las variables en la seccion CONFIG <<<
+#  >>> ANTES DE CORRER: copiar .env.example a .env y completarlo <<<
+#      cp .env.example .env && nano .env
 # =========================================================================
 set -euo pipefail
 
-# ----------------------------- CONFIG ------------------------------------
-# IP de Tailscale de esta VPS (tailscale ip -4). Se usa para las reglas UFW.
-TAILSCALE_IP="100.x.y.z"
-
-# License key de MaxMind GeoLite2 (cuenta gratis en maxmind.com).
-# Necesaria para bajar la base de datos de paises.
-MAXMIND_ACCOUNT_ID="TU_ACCOUNT_ID"
-MAXMIND_LICENSE_KEY="TU_LICENSE_KEY"
-
-# Puerto SSH (cambiar si no es el 22). Se abre en UFW para no lockearte.
-SSH_PORT="22"
-
 # Ruta a los archivos de config (por defecto, junto a este script)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# -------------------------------------------------------------------------
 
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
@@ -32,12 +20,34 @@ die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "Corré con sudo."
 
-# --- Guarda: no seguir con placeholders sin tocar ---
-[[ "$TAILSCALE_IP" != "100.x.y.z" ]] || die "Editá TAILSCALE_IP en la seccion CONFIG."
-[[ "$MAXMIND_LICENSE_KEY" != "TU_LICENSE_KEY" ]] || warn "MAXMIND_LICENSE_KEY sin setear: se saltea el geo-bloqueo."
+# =========================================================================
+#  Cargar variables desde .env
+# =========================================================================
+ENV_FILE="$SCRIPT_DIR/.env"
+[[ -f "$ENV_FILE" ]] || die "No existe $ENV_FILE. Copiá .env.example a .env y completalo:  cp .env.example .env"
+
+# set -a: exporta automaticamente todo lo que se define al sourcear el .env
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+# ----------------------------- CONFIG ------------------------------------
+# Valores por defecto si el .env no los define (SSH_PORT es opcional).
+# La IP de Tailscale NO se pone a mano; el script la deriva sola.
+SSH_PORT="${SSH_PORT:-22}"
+MAXMIND_ACCOUNT_ID="${MAXMIND_ACCOUNT_ID:-}"
+MAXMIND_LICENSE_KEY="${MAXMIND_LICENSE_KEY:-}"
+# -------------------------------------------------------------------------
+
+# --- Guarda: avisar si las creds de MaxMind quedaron sin setear ---
+if [[ -z "$MAXMIND_LICENSE_KEY" || "$MAXMIND_LICENSE_KEY" == "TU_LICENSE_KEY" ]]; then
+    warn "MAXMIND_LICENSE_KEY sin setear en .env: se saltea el geo-bloqueo."
+    MAXMIND_LICENSE_KEY=""
+fi
 
 # =========================================================================
-log "1/6 Instalando paquetes"
+log "1/7 Instalando paquetes"
 # =========================================================================
 apt-get update -qq
 apt-get install -y -qq \
@@ -48,9 +58,47 @@ apt-get install -y -qq \
     ufw
 
 # =========================================================================
-log "2/6 GeoIP2: bajando base de datos de MaxMind"
+log "2/7 Tailscale: instalacion y autenticacion"
 # =========================================================================
-if [[ "$MAXMIND_LICENSE_KEY" != "TU_LICENSE_KEY" ]]; then
+if ! command -v tailscale >/dev/null 2>&1; then
+    log "Instalando Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+else
+    log "Tailscale ya instalado, se saltea."
+fi
+
+# Levantar el servicio (idempotente)
+systemctl enable --now tailscaled
+
+# Verificar si ya esta autenticado. Si no, frenar aca: 'tailscale up' necesita
+# que abras una URL en el navegador, no se puede automatizar sin auth key.
+if ! tailscale status >/dev/null 2>&1; then
+    warn "Tailscale instalado pero SIN autenticar."
+    echo ""
+    echo "  Corré esto en otra terminal y autenticá en el navegador:"
+    echo "      sudo tailscale up"
+    echo ""
+    echo "  (o con SSH por Tailscale, recomendado):"
+    echo "      sudo tailscale up --ssh"
+    echo ""
+    echo "  Cuando termines, volvé a correr este script."
+    die "Autenticá Tailscale y reintentá."
+fi
+
+# Derivar la IP de Tailscale automaticamente
+TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+[[ -n "$TAILSCALE_IP" ]] || die "No pude obtener la IP de Tailscale. ¿Autenticaste con 'tailscale up'?"
+log "IP de Tailscale detectada: $TAILSCALE_IP"
+
+# Chequeo de coherencia: avisar si el compose todavia tiene el placeholder
+if grep -rq "100.x.y.z" /srv 2>/dev/null; then
+    warn "Ojo: encontré '100.x.y.z' en /srv. Reemplazá el placeholder en el compose por $TAILSCALE_IP."
+fi
+
+# =========================================================================
+log "3/7 GeoIP2: bajando base de datos de MaxMind"
+# =========================================================================
+if [[ -n "$MAXMIND_LICENSE_KEY" ]]; then
     cat > /etc/GeoIP.conf <<EOF
 AccountID $MAXMIND_ACCOUNT_ID
 LicenseKey $MAXMIND_LICENSE_KEY
@@ -71,7 +119,7 @@ else
 fi
 
 # =========================================================================
-log "3/6 nginx: colocando configs"
+log "4/7 nginx: colocando configs"
 # =========================================================================
 # Server block y headers de proxy
 install -m 0644 "$SCRIPT_DIR/nginx/jellyfin"            /etc/nginx/sites-available/jellyfin
@@ -111,7 +159,7 @@ else
 fi
 
 # =========================================================================
-log "4/6 fail2ban: filtro y jail de Jellyfin"
+log "5/7 fail2ban: filtro y jail de Jellyfin"
 # =========================================================================
 install -m 0644 "$SCRIPT_DIR/fail2ban/jellyfin.conf"  /etc/fail2ban/filter.d/jellyfin.conf
 install -m 0644 "$SCRIPT_DIR/fail2ban/jellyfin.local" /etc/fail2ban/jail.d/jellyfin.local
@@ -130,9 +178,13 @@ systemctl enable fail2ban
 systemctl restart fail2ban
 
 # =========================================================================
-log "5/6 UFW: firewall"
+log "6/7 UFW: firewall"
 # =========================================================================
 # ORDEN IMPORTANTE: permitir SSH y Tailscale ANTES de enable, o te lockeas.
+# Guarda: la interfaz tailscale0 tiene que existir (Tailscale ya levantado).
+if ! ip link show tailscale0 >/dev/null 2>&1; then
+    die "No existe la interfaz tailscale0. Tailscale no esta levantado; abortando ANTES de tocar el firewall para no lockearte."
+fi
 ufw --force reset >/dev/null
 ufw default deny incoming
 ufw default allow outgoing
@@ -143,7 +195,7 @@ ufw allow 80/tcp            comment 'Jellyfin via nginx'
 ufw --force enable
 
 # =========================================================================
-log "6/6 Listo. Verificaciones pendientes:"
+log "7/7 Listo. Verificaciones pendientes:"
 # =========================================================================
 cat <<EOF
 

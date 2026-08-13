@@ -21,20 +21,41 @@ services:
   # Jellyfin - media server. UNICO expuesto, detras de nginx en el host.
   # Bindeado a localhost: solo nginx le llega.
   # -----------------------------------------------------------------------
+
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
     networks: [media]
+    restart: unless-stopped
     ports:
-      - "127.0.0.1:8096:8096"   # solo nginx (reverse proxy en el host)
+      - "127.0.0.1:8096:8096"
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=America/Argentina/Buenos_Aires
+      - JELLYFIN_PublishedServerUrl=http://194.238.30.202
     volumes:
       - /srv/config/jellyfin:/config
-      - /srv/media:/data
-    restart: unless-stopped
+      # media — MISMOS paths de siempre
+      - /srv/media/movies:/data/movies
+      - /srv/media/series:/data/series
+      - /srv/media/anime:/data/anime
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # -----------------------------------------------------------------------
   # VPN: todo el trafico de qBittorrent sale por aca. Killswitch incluido.
