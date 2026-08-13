@@ -62,7 +62,8 @@ services:
       - VPN_PORT_FORWARDING=on
       - VPN_PORT_FORWARDING_PROVIDER=protonvpn
       # Elegi pais con servidores P2P (ej: Suiza, Paises Bajos)
-      - SERVER_COUNTRIES=Switzerland
+      - SERVER_COUNTRIES=Spain
+      - PORT_FORWARD_ONLY=on
       - TZ=America/Argentina/Buenos_Aires
       # Permite que la red interna de Docker llegue a la WebUI
       - FIREWALL_OUTBOUND_SUBNETS=172.20.0.0/16
