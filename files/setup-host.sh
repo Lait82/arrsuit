@@ -153,13 +153,23 @@ EOF
     spin "Descargando base de datos GeoLite2" \
         geoipupdate || warn "geoipupdate fallo. Revisar credenciales de MaxMind."
 
+    # Detectar donde quedo la DB: /var/lib/GeoIP (geoipupdate nuevo) o
+    # /usr/share/GeoIP (versiones viejas). No asumimos la ruta.
+    GEOIP_DB="$(find /var/lib/GeoIP /usr/share/GeoIP -name 'GeoLite2-Country.mmdb' 2>/dev/null | head -n1 || true)"
+    if [[ -z "$GEOIP_DB" ]]; then
+        warn "No encontré GeoLite2-Country.mmdb tras el update. Se configura SIN geo-bloqueo."
+        GEO_ENABLED=0
+    else
+        log "Base GeoIP encontrada en: $GEOIP_DB"
+        GEO_ENABLED=1
+    fi
+
     # Cron semanal para mantener la DB al dia
     cat > /etc/cron.weekly/geoipupdate <<'EOF'
 #!/bin/sh
 /usr/bin/geoipupdate
 EOF
     chmod +x /etc/cron.weekly/geoipupdate
-    GEO_ENABLED=1
 else
     warn "Sin license key: nginx se configura SIN geo-bloqueo (comentado)."
     GEO_ENABLED=0
@@ -178,17 +188,20 @@ rm -f /etc/nginx/sites-enabled/default
 
 # Insertar el bloque geoip2 dentro de http { } si no esta ya
 if [[ "$GEO_ENABLED" -eq 1 ]]; then
-    if ! grep -q "geoip2 /usr/share/GeoIP" /etc/nginx/nginx.conf; then
-        # Inserta el snippet justo despues de la linea 'http {'
-        GEO_SNIPPET="$(sed 's/^/\t/' "$SCRIPT_DIR/nginx/geoip2-snippet.conf")"
+    if ! grep -q "geoip2 .*GeoLite2-Country.mmdb" /etc/nginx/nginx.conf; then
+        # Toma el snippet y le corrige la ruta a la DB detectada ($GEOIP_DB)
+        GEO_SNIPPET="$(sed "s|geoip2 .*GeoLite2-Country.mmdb|geoip2 $GEOIP_DB|" \
+            "$SCRIPT_DIR/nginx/geoip2-snippet.conf" | sed 's/^/\t/')"
         awk -v snip="$GEO_SNIPPET" '
             /^http[[:space:]]*{/ && !done { print; print snip; done=1; next }
             { print }
         ' /etc/nginx/nginx.conf > /etc/nginx/nginx.conf.tmp
         mv /etc/nginx/nginx.conf.tmp /etc/nginx/nginx.conf
-        log "Bloque geoip2 insertado en nginx.conf"
+        log "Bloque geoip2 insertado en nginx.conf (DB: $GEOIP_DB)"
     else
-        log "Bloque geoip2 ya presente, se saltea"
+        # Ya existe: corregir la ruta por si apunta a una DB en otro lado
+        sed -i "s|geoip2 .*GeoLite2-Country.mmdb|geoip2 $GEOIP_DB|" /etc/nginx/nginx.conf
+        log "Bloque geoip2 ya presente; ruta de DB actualizada a $GEOIP_DB"
     fi
 else
     # Sin geo: comentar el 'if ($allowed_country = no)' para que nginx valide
