@@ -143,12 +143,26 @@ apply_qbit_bypass() {
     # Backup por las dudas
     cp -a "$QBIT_CONF" "${QBIT_CONF}.bak.$(date +%s)"
 
+    # Limpieza previa: borrar CUALQUIER linea de estas claves, bien o mal
+    # escrita (con barra, sin barra por el bug del -v, con otra subnet, o
+    # duplicadas). Asi el archivo converge a lo correcto sin importar como
+    # quedo de corridas anteriores. Matcheamos 'AuthSubnetWhitelist' que es
+    # comun a la version correcta y a la rota (WebUIAuthSubnet sin barra).
+    if grep -qF 'AuthSubnetWhitelist' "$QBIT_CONF"; then
+        logfile "Limpiando lineas AuthSubnet previas (bien o mal escritas)"
+        grep -vF 'AuthSubnetWhitelist' "$QBIT_CONF" > "${QBIT_CONF}.tmp" \
+            && mv "${QBIT_CONF}.tmp" "$QBIT_CONF"
+    fi
+
     # Asegurar seccion [Preferences]
     grep -qF '[Preferences]' "$QBIT_CONF" || echo '[Preferences]' >> "$QBIT_CONF"
 
     # set_conf_key con awk usando ENVIRON: pasar el valor por -v hace que awk
     # interprete '\A' como escape y se coma la barra. Via ENVIRON[] el string
     # es literal, asi 'WebUI\AuthSubnet...' se preserva con la barra.
+    # (Como recien limpiamos, las claves NO existen -> caen al branch 'else'
+    #  que las agrega bajo [Preferences]. El branch de reemplazo queda igual
+    #  por robustez ante otras claves que se agreguen en el futuro.)
     set_conf_key() {
         local key="$1" val="$2"
         export _CK_KEY="$key" _CK_LINE="${key}=${val}"
@@ -165,7 +179,6 @@ apply_qbit_bypass() {
         fi
         unset _CK_KEY _CK_LINE
     }
-    
     set_conf_key 'WebUI\AuthSubnetWhitelistEnabled' 'true'
     set_conf_key 'WebUI\AuthSubnetWhitelist' "$MEDIA_SUBNET"
     # Si aparece un 403 desde otros contenedores, descomentar:
