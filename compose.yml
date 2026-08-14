@@ -45,6 +45,7 @@ services:
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
+    networks: [media]
     cap_add:
       - NET_ADMIN
     devices:
