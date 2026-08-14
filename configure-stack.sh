@@ -146,20 +146,26 @@ apply_qbit_bypass() {
     # Asegurar seccion [Preferences]
     grep -qF '[Preferences]' "$QBIT_CONF" || echo '[Preferences]' >> "$QBIT_CONF"
 
+    # set_conf_key con awk usando ENVIRON: pasar el valor por -v hace que awk
+    # interprete '\A' como escape y se coma la barra. Via ENVIRON[] el string
+    # es literal, asi 'WebUI\AuthSubnet...' se preserva con la barra.
     set_conf_key() {
         local key="$1" val="$2"
+        export _CK_KEY="$key" _CK_LINE="${key}=${val}"
         if grep -qF "${key}=" "$QBIT_CONF"; then
-            awk -v k="${key}=" -v line="${key}=${val}" '
-                index($0, k) == 1 { print line; next }
+            awk '
+                index($0, ENVIRON["_CK_KEY"] "=") == 1 { print ENVIRON["_CK_LINE"]; next }
                 { print }
             ' "$QBIT_CONF" > "${QBIT_CONF}.tmp" && mv "${QBIT_CONF}.tmp" "$QBIT_CONF"
         else
-            awk -v line="${key}=${val}" '
+            awk '
                 { print }
-                /^\[Preferences\]/ && !done { print line; done=1 }
+                /^\[Preferences\]/ && !done { print ENVIRON["_CK_LINE"]; done=1 }
             ' "$QBIT_CONF" > "${QBIT_CONF}.tmp" && mv "${QBIT_CONF}.tmp" "$QBIT_CONF"
         fi
+        unset _CK_KEY _CK_LINE
     }
+    
     set_conf_key 'WebUI\AuthSubnetWhitelistEnabled' 'true'
     set_conf_key 'WebUI\AuthSubnetWhitelist' "$MEDIA_SUBNET"
     # Si aparece un 403 desde otros contenedores, descomentar:
