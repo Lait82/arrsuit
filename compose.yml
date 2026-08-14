@@ -50,7 +50,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - "127.0.0.1:8080:8080"   # WebUI qBittorrent -> acceso por Tailscale via IP del host
+      - "${TAILSCALE_IP}:8080:8080"   # WebUI qBittorrent -> acceso por Tailscale via IP del host
       - "6881:6881"             # torrent TCP (sale por ProtonVPN igual)
       - "6881:6881/udp"         # torrent UDP
     environment:
@@ -73,7 +73,8 @@ services:
   # Cliente de descargas - corre DENTRO de la red de gluetun
   # -----------------------------------------------------------------------
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    # image: lscr.io/linuxserver/qbittorrent:latest # Wait until compatibility issues with radarr and sonarr are fixed before updating:
+    image: lscr.io/linuxserver/qbittorrent:5.1.4
     container_name: qbittorrent
     network_mode: "service:gluetun"   # <-- clave: todo su trafico va por la VPN
     depends_on:
