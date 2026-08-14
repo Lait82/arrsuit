@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_FILE="$SCRIPT_DIR/services_setup.conf"
+CONF_FILE="$SCRIPT_DIR/configs/services_setup.conf"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
