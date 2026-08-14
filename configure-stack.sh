@@ -7,7 +7,9 @@
 #    1. Levanta el stack (docker compose up -d) si no esta arriba.
 #    2. Configura el bypass de auth de qBittorrent para la red 'media'
 #       (edita qBittorrent.conf; para y arranca el contenedor para hacerlo).
-#    3. Conecta Radarr -> qBittorrent (download client) via API REST.
+#    3. Setea la auth de Radarr en External (Tailscale es la capa de acceso;
+#       no pide login por web, la API key sigue funcionando).
+#    4. Conecta Radarr -> qBittorrent (download client) via API REST.
 #
 #  Idempotente: se puede correr varias veces sin romper ni duplicar nada.
 #
@@ -193,7 +195,57 @@ apply_qbit_bypass() {
 apply_qbit_bypass
 
 # =========================================================================
-log "3/3 Conectando Radarr -> qBittorrent"
+log "3/4 Configurando auth de Radarr (External: la maneja Tailscale)"
+# =========================================================================
+# Radarr no considera la IP de Tailscale como "local", asi que
+# "Disabled for Local Addresses" NO sirve (te pide login igual).
+# Solucion: AuthenticationMethod=External -> Radarr delega la auth a la
+# capa de acceso (Tailscale) y no pide login. Nadie llega sin estar en el
+# tailnet, asi que la auth ya la hizo Tailscale.
+# La API key sigue funcionando para Prowlarr/Sonarr/este script.
+#
+# Patron stop/edit/start (como qBittorrent): Radarr reescribe el XML al
+# apagarse, hay que editarlo con el contenedor detenido.
+apply_radarr_auth() {
+    [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
+
+    # ¿Ya esta en External? (idempotencia)
+    if grep -qF '<AuthenticationMethod>External</AuthenticationMethod>' "$RADARR_CONFIG_XML"; then
+        log "Auth de Radarr ya esta en External. No se toca."
+        return 0
+    fi
+
+    log "Parando Radarr para editar su config..."
+    $DC stop radarr >/dev/null
+    logfile "radarr detenido para editar $RADARR_CONFIG_XML"
+    cp -a "$RADARR_CONFIG_XML" "${RADARR_CONFIG_XML}.bak.$(date +%s)"
+
+    # Bug conocido (#9353): editar mal deja <AuthenticationMethod> duplicados.
+    # Estrategia robusta: borrar TODAS las lineas de AuthenticationMethod y
+    # AuthenticationRequired, y reescribir una sola de cada una.
+    grep -vE '<Authentication(Method|Required)>' "$RADARR_CONFIG_XML" \
+        > "${RADARR_CONFIG_XML}.tmp" && mv "${RADARR_CONFIG_XML}.tmp" "$RADARR_CONFIG_XML"
+
+    # Insertar las dos lineas correctas justo despues de <Config>
+    # (usa awk+ENVIRON por consistencia; aca no hay backslash pero da igual)
+    export _RA_M='  <AuthenticationMethod>External</AuthenticationMethod>'
+    export _RA_R='  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>'
+    awk '
+        { print }
+        /<Config>/ && !done { print ENVIRON["_RA_M"]; print ENVIRON["_RA_R"]; done=1 }
+    ' "$RADARR_CONFIG_XML" > "${RADARR_CONFIG_XML}.tmp" && mv "${RADARR_CONFIG_XML}.tmp" "$RADARR_CONFIG_XML"
+    unset _RA_M _RA_R
+
+    logfile "AuthenticationMethod=External escrito en $RADARR_CONFIG_XML"
+    log "Arrancando Radarr..."
+    $DC start radarr >/dev/null
+    sleep 5
+    log "Auth de Radarr en External (sin login; Tailscale es la capa de acceso)."
+}
+apply_radarr_auth
+
+# =========================================================================
+log "4/4 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
