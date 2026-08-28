@@ -10,6 +10,7 @@
 #    3. Setea la auth de Radarr en External (Tailscale es la capa de acceso;
 #       no pide login por web, la API key sigue funcionando).
 #    4. Conecta Radarr -> qBittorrent (download client) via API REST.
+#    5. Crea el root folder de Radarr (biblioteca de peliculas) via API REST.
 #
 #  Idempotente: se puede correr varias veces sin romper ni duplicar nada.
 #
@@ -88,6 +89,14 @@ RADARR_CATEGORY="$(conf '.radarr.downloadClientCategory')"
 DOWNLOAD_DIR="$(conf '.torrentClient.downloadDir')"
 RADARR_URL="http://${TAILSCALE_IP}:${RADARR_PORT}"
 
+RADARR_ROOT_FOLDER="$(conf '.radarr.rootFolder')"
+[[ -n "$RADARR_ROOT_FOLDER" && "$RADARR_ROOT_FOLDER" != "null" ]] \
+    || die "Falta .radarr.rootFolder en $CONF_FILE (ej: \"/data/movies\")"
+case "$RADARR_ROOT_FOLDER" in
+    /data/*) ;;
+    *) die "rootFolder debe ser una ruta interna del contenedor (/data/...), no del host. Valor actual: $RADARR_ROOT_FOLDER" ;;
+esac
+
 # =========================================================================
 #  Helper API (loguea todo; setea HTTP_CODE y HTTP_BODY; no aborta solo)
 # =========================================================================
@@ -109,7 +118,7 @@ api_call() {
 }
 
 # =========================================================================
-log "1/3 Levantando el stack (si hace falta)"
+log "1/5 Levantando el stack (si hace falta)"
 # =========================================================================
 cd "$SCRIPT_DIR"
 if $DC ps --status running 2>/dev/null | grep -q "$QBIT_CONTAINER"; then
@@ -122,7 +131,7 @@ else
 fi
 
 # =========================================================================
-log "2/3 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
+log "2/5 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
 # =========================================================================
 # qBittorrent reescribe su .conf al apagarse, asi que hay que:
 #   parar el contenedor -> editar el archivo -> arrancarlo.
@@ -195,7 +204,7 @@ apply_qbit_bypass() {
 apply_qbit_bypass
 
 # =========================================================================
-log "3/4 Configurando auth de Radarr (External: la maneja Tailscale)"
+log "3/5 Configurando auth de Radarr (External: la maneja Tailscale)"
 # =========================================================================
 # Radarr no considera la IP de Tailscale como "local", asi que
 # "Disabled for Local Addresses" NO sirve (te pide login igual).
@@ -245,7 +254,7 @@ apply_radarr_auth() {
 apply_radarr_auth
 
 # =========================================================================
-log "4/4 Conectando Radarr -> qBittorrent"
+log "4/5 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
@@ -254,6 +263,7 @@ RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
 echo "  Torrent client : $TC_NAME @ $TC_HOST:$TC_PORT"
 echo "  Categoria      : $RADARR_CATEGORY"
 echo "  Download dir   : $DOWNLOAD_DIR"
+echo "  Root folder    : $RADARR_ROOT_FOLDER (dentro del contenedor)"
 echo "  Radarr         : $RADARR_URL"
 echo "  Log            : $LOG_FILE"
 
@@ -265,6 +275,7 @@ for i in {1..30}; do
     sleep 2
 done
 
+add_download_client() {
 # Idempotencia: ¿ya existe el download client?
 if api_call GET "$RADARR_URL/api/v3/downloadclient"; then
     EXISTING="$(echo "$HTTP_BODY" | jq -r --arg n "$TC_NAME" \
@@ -272,8 +283,7 @@ if api_call GET "$RADARR_URL/api/v3/downloadclient"; then
     if [[ -n "$EXISTING" ]]; then
         warn "Ya existe el download client '$TC_NAME' (id $EXISTING). No se duplica."
         logfile "Download client ya existe (id $EXISTING)."
-        log "Listo. Nada mas que hacer."
-        exit 0
+        return 0
     fi
 else
     die "No pude listar download clients (HTTP $HTTP_CODE). Ver $LOG_FILE"
@@ -321,6 +331,57 @@ else
     echo "$HTTP_BODY" | jq -r '.[]? | "  - \(.propertyName): \(.errorMessage)"' 2>/dev/null || echo "  $HTTP_BODY"
     die "No se pudo agregar. Ver $LOG_FILE"
 fi
+}
+add_download_client
+
+# =========================================================================
+log "5/5 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
+# =========================================================================
+# Sin root folder, Radarr no puede agregar ni una pelicula: es donde organiza
+# la biblioteca. Tiene que estar DENTRO del mismo filesystem que /data/downloads
+# para que el move de qBittorrent -> biblioteca sea hardlink y no copia.
+add_root_folder() {
+    # Chequeo previo: que la carpeta exista dentro del contenedor. Da un error
+    # mucho mas claro que el 400 generico de la API.
+    if ! docker exec radarr test -d "$RADARR_ROOT_FOLDER" 2>/dev/null; then
+        warn "Radarr no ve la carpeta $RADARR_ROOT_FOLDER."
+        warn "Creala en el host (el compose monta /srv/media como /data):"
+        warn "    sudo mkdir -p /srv/media/movies && sudo chown -R 1000:1000 /srv/media"
+        die "Abortando: no agrego un root folder que no existe."
+    fi
+
+    # Idempotencia: ¿ya esta cargado ese path?
+    if api_call GET "$RADARR_URL/api/v3/rootfolder"; then
+        local existing
+        existing="$(echo "$HTTP_BODY" | jq -r --arg p "$RADARR_ROOT_FOLDER" \
+            '.[] | select(.path == $p) | .id' | head -n1 || true)"
+        if [[ -n "$existing" ]]; then
+            warn "El root folder '$RADARR_ROOT_FOLDER' ya existe (id $existing). No se duplica."
+            logfile "Root folder ya existe (id $existing)."
+            return 0
+        fi
+    else
+        die "No pude listar root folders (HTTP $HTTP_CODE). Ver $LOG_FILE"
+    fi
+
+    local payload
+    payload="$(jq -n --arg path "$RADARR_ROOT_FOLDER" '{ path: $path }')"
+
+    log "Agregando el root folder..."
+    if api_call POST "$RADARR_URL/api/v3/rootfolder" "$payload"; then
+        local new_id free
+        new_id="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
+        free="$(echo "$HTTP_BODY" | jq -r '.freeSpace // empty')"
+        log "Root folder '$RADARR_ROOT_FOLDER' agregado (id ${new_id:-?})"
+        [[ -n "$free" ]] && echo "  Espacio libre: $(( free / 1024 / 1024 / 1024 )) GB"
+    else
+        warn "Fallo al agregar el root folder (HTTP $HTTP_CODE):"
+        echo "$HTTP_BODY" | jq -r '.[]? | "  - \(.propertyName): \(.errorMessage)"' 2>/dev/null || echo "  $HTTP_BODY"
+        die "No se pudo agregar el root folder. Ver $LOG_FILE"
+    fi
+}
+add_root_folder
 
 logfile "=== configure-stack.sh finalizado OK ==="
-log "Listo. Radarr conectado a qBittorrent. Log en $LOG_FILE"
+log "Listo. Radarr conectado a qBittorrent y con biblioteca en $RADARR_ROOT_FOLDER."
+log "Log en $LOG_FILE"
