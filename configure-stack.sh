@@ -13,6 +13,12 @@
 #       no pide login por web, la API key sigue funcionando).
 #    4. Conecta Radarr -> qBittorrent (download client) via API REST.
 #    5. Crea el root folder de Radarr (biblioteca de peliculas) via API REST.
+#    6. Configura Sonarr igual que Radarr (auth, download client, root folder),
+#       llamando a las funciones de scripts/configure-sonarr.sh.
+#
+#  ARQUITECTURA: este archivo es el ORQUESTADOR. Define los pasos y llama
+#  funciones; los servicios nuevos van en scripts/ y se sourcean, no se copian
+#  aca. Helpers compartidos en scripts/lib/common.sh.
 #
 #  Idempotente: se puede correr varias veces sin romper ni duplicar nada.
 #
@@ -106,6 +112,20 @@ case "$RADARR_ROOT_FOLDER" in
     *) die "rootFolder debe ser una ruta interna del contenedor (/data/...), no del host. Valor actual: $RADARR_ROOT_FOLDER" ;;
 esac
 
+# --- Modulos de servicio -------------------------------------------------
+# Este archivo es el ORQUESTADOR: define los pasos y llama funciones que viven
+# en scripts/. Los modulos se SOURCEAN (no se ejecutan como subproceso) para
+# que compartan DC, LOG_FILE, PUID/PGID, TAILSCALE_IP y el canal de retorno
+# HTTP_CODE/HTTP_BODY. Cada modulo solo DEFINE funciones: no corre nada al
+# cargarse, asi el orden de ejecucion lo sigue decidiendo este archivo.
+for _mod in "$SCRIPT_DIR/scripts/lib/common.sh" \
+            "$SCRIPT_DIR/scripts/configure-sonarr.sh"; do
+    [[ -f "$_mod" ]] || die "Falta el modulo $_mod"
+    # shellcheck disable=SC1090
+    source "$_mod"
+done
+unset _mod
+
 # =========================================================================
 #  Helper API (loguea todo; setea HTTP_CODE y HTTP_BODY; no aborta solo)
 # =========================================================================
@@ -127,7 +147,7 @@ api_call() {
 }
 
 # =========================================================================
-log "1/6 Preparando el arbol de carpetas en el host"
+log "1/7 Preparando el arbol de carpetas en el host"
 # =========================================================================
 # ESTO VA ANTES DE 'docker compose up'. Si el destino de un bind mount no
 # existe, Docker lo crea root:root 755 y despues los contenedores (que corren
@@ -180,7 +200,7 @@ prepare_media_tree() {
 prepare_media_tree
 
 # =========================================================================
-log "2/6 Levantando el stack (si hace falta)"
+log "2/7 Levantando el stack (si hace falta)"
 # =========================================================================
 cd "$SCRIPT_DIR"
 if $DC ps --status running 2>/dev/null | grep -q "$QBIT_CONTAINER"; then
@@ -193,7 +213,7 @@ else
 fi
 
 # =========================================================================
-log "3/6 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
+log "3/7 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
 # =========================================================================
 # qBittorrent reescribe su .conf al apagarse, asi que hay que:
 #   parar el contenedor -> editar el archivo -> arrancarlo.
@@ -266,7 +286,7 @@ apply_qbit_bypass() {
 apply_qbit_bypass
 
 # =========================================================================
-log "4/6 Configurando auth de Radarr (External: la maneja Tailscale)"
+log "4/7 Configurando auth de Radarr (External: la maneja Tailscale)"
 # =========================================================================
 # Radarr no considera la IP de Tailscale como "local", asi que
 # "Disabled for Local Addresses" NO sirve (te pide login igual).
@@ -316,7 +336,7 @@ apply_radarr_auth() {
 apply_radarr_auth
 
 # =========================================================================
-log "5/6 Conectando Radarr -> qBittorrent"
+log "5/7 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
@@ -397,12 +417,12 @@ fi
 add_download_client
 
 # =========================================================================
-log "6/6 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
+log "6/7 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
 # =========================================================================
 # Sin root folder, Radarr no puede agregar ni una pelicula: es donde organiza
 # la biblioteca. Tiene que estar DENTRO del mismo filesystem que /data/downloads
 # para que el move de qBittorrent -> biblioteca sea hardlink y no copia.
-# Verificacion (NO reparacion: de los permisos se encarga el paso 1/6).
+# Verificacion (NO reparacion: de los permisos se encarga el paso 1/7).
 # Existe porque es el unico chequeo hecho DESDE ADENTRO del contenedor, que es
 # donde la respuesta cuenta. Un chequeo en el host no puede ver: un bind
 # montado :ro, un mount que fallo y dejo /data vacio, SELinux sin labels :z, o
@@ -421,7 +441,7 @@ assert_media_dir_writable() {
     fi
 
     warn "Radarr (uid $PUID / 'abc') no puede escribir en $ctr_path"
-    warn "El paso 1/6 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
+    warn "El paso 1/7 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
     warn "Revisá, en este orden:"
     warn "  1) que el bind este montado y no sea read-only:"
     warn "       docker exec radarr mount | grep /data"
@@ -471,6 +491,19 @@ add_root_folder() {
 assert_media_dir_writable "${MEDIA_CTR_DIR}/downloads"
 add_root_folder
 
+# =========================================================================
+log "7/7 Configurando Sonarr"
+# =========================================================================
+# Las funciones viven en scripts/configure-sonarr.sh (sourceado arriba).
+# El orden importa: apply_auth reinicia Sonarr, wait_ready espera a que vuelva
+# y recien ahi se puede pegarle a la API.
+sonarr_apply_auth
+sonarr_wait_ready
+sonarr_add_download_client
+sonarr_add_root_folder
+
 logfile "=== configure-stack.sh finalizado OK ==="
-log "Listo. Radarr conectado a qBittorrent y con biblioteca en $RADARR_ROOT_FOLDER."
+log "Listo. Radarr y Sonarr conectados a qBittorrent."
+echo "  Peliculas : $RADARR_ROOT_FOLDER"
+echo "  Series    : $SONARR_ROOT_FOLDER"
 log "Log en $LOG_FILE"

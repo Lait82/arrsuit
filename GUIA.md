@@ -115,7 +115,7 @@ Configurá en este orden (cada uno depende del anterior):
    - Root folder: `/data/movies`
 4. **Sonarr** — igual que Radarr:
    - Host: `gluetun`, Port `8080`, Category `sonarr`
-   - Root folder: `/data/tv`
+   - Root folder: `/data/series`
 5. **Bazarr** — conectá con Radarr (`http://radarr:7878`) y Sonarr
    (`http://sonarr:8989`). Agregá proveedores de subs (OpenSubtitles, Subdivx)
    y poné español como idioma deseado.
@@ -180,7 +180,7 @@ reencodees video**. Lo único que te fuerza transcode en vivo es el audio DTS
 (Samsung sacó el decodificador DTS) y los subtítulos bitmap.
 
 En Tdarr:
-1. Creá una **Library** apuntando a `/data/movies` y otra a `/data/tv`.
+1. Creá una **Library** apuntando a `/data/movies` y otra a `/data/series`.
 2. En los **plugins de esa library**, NO uses plugins de transcode de video.
    Usá un flujo tipo:
    - Plugin de audio: *"Migz - Convert audio to AC3/EAC3 if source is DTS"*
