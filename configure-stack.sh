@@ -4,6 +4,8 @@
 #
 #  Pensado para alguien que apenas se maneja: un solo comando deja todo listo.
 #  Hace, en orden:
+#    0. Crea /srv/media/{downloads,movies,tv} con dueño 1000:1000 ANTES de
+#       levantar nada (si no, Docker las crea root:root y nada puede escribir).
 #    1. Levanta el stack (docker compose up -d) si no esta arriba.
 #    2. Configura el bypass de auth de qBittorrent para la red 'media'
 #       (edita qBittorrent.conf; para y arranca el contenedor para hacerlo).
@@ -44,6 +46,9 @@ logfile "=== configure-stack.sh iniciado ==="
 #   RADARR_PORT=7878  -> bind de Radarr en el compose.
 #   MEDIA_SUBNET      -> subnet de la red 'media' (para el bypass de auth).
 #   QBIT_CONF         -> qBittorrent.conf en el host (via volumen del compose).
+#   MEDIA_HOST_DIR    -> lado HOST del bind '/srv/media:/data'.
+#   MEDIA_CTR_DIR     -> lado CONTENEDOR del mismo bind.
+#   PUID/PGID=1000    -> los del compose. Adentro del contenedor ese uid es 'abc'.
 TC_NAME="qBittorrent"
 TC_HOST="gluetun"
 TC_PORT=8080
@@ -52,6 +57,10 @@ RADARR_CONFIG_XML="/srv/config/radarr/config.xml"
 MEDIA_SUBNET="172.20.0.0/16"
 QBIT_CONF="/srv/config/qbittorrent/qBittorrent/qBittorrent.conf"
 QBIT_CONTAINER="qbittorrent"
+MEDIA_HOST_DIR="/srv/media"
+MEDIA_CTR_DIR="/data"
+PUID=1000
+PGID=1000
 
 # =========================================================================
 #  Prerrequisitos
@@ -118,7 +127,60 @@ api_call() {
 }
 
 # =========================================================================
-log "1/5 Levantando el stack (si hace falta)"
+log "1/6 Preparando el arbol de carpetas en el host"
+# =========================================================================
+# ESTO VA ANTES DE 'docker compose up'. Si el destino de un bind mount no
+# existe, Docker lo crea root:root 755 y despues los contenedores (que corren
+# como uid $PUID) no pueden escribir ahi. Creandolas nosotros primero, con el
+# dueño correcto, Docker nunca tiene que inventar nada.
+#
+# /srv/config no hace falta chownearlo a mano: las imagenes de linuxserver
+# arrancan como root y ajustan el dueño de su propio /config al iniciar.
+# /data NO lo tocan (y esta bien: no queres un chown recursivo de tu
+# biblioteca en cada arranque), por eso el media tree es cosa nuestra.
+
+# Traduce una ruta del contenedor (/data/movies) a la del host
+# (/srv/media/movies) usando el bind del compose. El mkdir/chown se hacen en el
+# host, pero la config habla en rutas de contenedor.
+ctr_to_host_path() {
+    echo "${MEDIA_HOST_DIR}${1#$MEDIA_CTR_DIR}"
+}
+
+prepare_media_tree() {
+    local d
+    # El root folder sale de la config, asi que se agrega a la lista en vez de
+    # asumir que es /data/movies: si lo cambias en services_setup.conf, esta
+    # carpeta se crea igual y con el dueño correcto.
+    for d in "$MEDIA_HOST_DIR" "$MEDIA_HOST_DIR/downloads" \
+             "$MEDIA_HOST_DIR/movies" "$MEDIA_HOST_DIR/series"\
+             "$(ctr_to_host_path "$RADARR_ROOT_FOLDER")" "/srv/config"; do
+        if [[ ! -d "$d" ]]; then
+            log "Creando $d"
+            mkdir -p "$d" || die "No pude crear $d"
+            logfile "mkdir -p $d"
+        fi
+    done
+
+    # Solo chowneamos si hace falta. 'find -not -uid' evita un chown -R sobre
+    # una biblioteca grande cuando ya esta todo bien (que es el caso normal).
+    if find "$MEDIA_HOST_DIR" \( -not -uid "$PUID" -o -not -gid "$PGID" \) \
+        -print -quit 2>/dev/null | grep -q .; then
+        log "Ajustando dueño de $MEDIA_HOST_DIR -> ${PUID}:${PGID} (puede tardar si hay muchos archivos)"
+        chown -R "${PUID}:${PGID}" "$MEDIA_HOST_DIR" || die "Fallo el chown de $MEDIA_HOST_DIR"
+        logfile "chown -R ${PUID}:${PGID} $MEDIA_HOST_DIR"
+    else
+        log "Dueño de $MEDIA_HOST_DIR ya es correcto (${PUID}:${PGID})"
+    fi
+
+    # setgid en los directorios: lo que se cree adentro hereda el grupo, asi
+    # ningun servicio del stack se queda afuera de lo que escribio otro.
+    chmod -R u+rwX,g+rwX "$MEDIA_HOST_DIR" || die "Fallo el chmod de $MEDIA_HOST_DIR"
+    find "$MEDIA_HOST_DIR" -type d -exec chmod g+s {} + 2>/dev/null || true
+}
+prepare_media_tree
+
+# =========================================================================
+log "2/6 Levantando el stack (si hace falta)"
 # =========================================================================
 cd "$SCRIPT_DIR"
 if $DC ps --status running 2>/dev/null | grep -q "$QBIT_CONTAINER"; then
@@ -131,7 +193,7 @@ else
 fi
 
 # =========================================================================
-log "2/5 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
+log "3/6 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
 # =========================================================================
 # qBittorrent reescribe su .conf al apagarse, asi que hay que:
 #   parar el contenedor -> editar el archivo -> arrancarlo.
@@ -204,7 +266,7 @@ apply_qbit_bypass() {
 apply_qbit_bypass
 
 # =========================================================================
-log "3/5 Configurando auth de Radarr (External: la maneja Tailscale)"
+log "4/6 Configurando auth de Radarr (External: la maneja Tailscale)"
 # =========================================================================
 # Radarr no considera la IP de Tailscale como "local", asi que
 # "Disabled for Local Addresses" NO sirve (te pide login igual).
@@ -254,7 +316,7 @@ apply_radarr_auth() {
 apply_radarr_auth
 
 # =========================================================================
-log "4/5 Conectando Radarr -> qBittorrent"
+log "5/6 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
@@ -335,20 +397,41 @@ fi
 add_download_client
 
 # =========================================================================
-log "5/5 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
+log "6/6 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
 # =========================================================================
 # Sin root folder, Radarr no puede agregar ni una pelicula: es donde organiza
 # la biblioteca. Tiene que estar DENTRO del mismo filesystem que /data/downloads
 # para que el move de qBittorrent -> biblioteca sea hardlink y no copia.
-add_root_folder() {
-    # Chequeo previo: que la carpeta exista dentro del contenedor. Da un error
-    # mucho mas claro que el 400 generico de la API.
-    if ! docker exec radarr test -d "$RADARR_ROOT_FOLDER" 2>/dev/null; then
-        warn "Radarr no ve la carpeta $RADARR_ROOT_FOLDER."
-        warn "Creala en el host (el compose monta /srv/media como /data):"
-        warn "    sudo mkdir -p /srv/media/movies && sudo chown -R 1000:1000 /srv/media"
-        die "Abortando: no agrego un root folder que no existe."
+# Verificacion (NO reparacion: de los permisos se encarga el paso 1/6).
+# Existe porque es el unico chequeo hecho DESDE ADENTRO del contenedor, que es
+# donde la respuesta cuenta. Un chequeo en el host no puede ver: un bind
+# montado :ro, un mount que fallo y dejo /data vacio, SELinux sin labels :z, o
+# userns-remap (donde el uid $PUID del contenedor NO es el $PUID del host y
+# ningun chown en el host sirve).
+#
+# Ojo con el -u $PUID: 'docker exec' sin eso corre como root, y root escribe
+# siempre -> el test daria un falso OK.
+assert_media_dir_writable() {
+    local ctr_path="$1" host_path
+    host_path="$(ctr_to_host_path "$ctr_path")"
+
+    if docker exec -u "$PUID" radarr test -w "$ctr_path" 2>/dev/null; then
+        log "Permisos OK: Radarr puede escribir en $ctr_path"
+        return 0
     fi
+
+    warn "Radarr (uid $PUID / 'abc') no puede escribir en $ctr_path"
+    warn "El paso 1/6 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
+    warn "Revisá, en este orden:"
+    warn "  1) que el bind este montado y no sea read-only:"
+    warn "       docker exec radarr mount | grep /data"
+    warn "  2) que dockerd no tenga userns-remap (remapea los uid del contenedor):"
+    warn "       docker info | grep -i userns"
+    warn "  3) SELinux: si esta activo, el compose necesita ':z' en el volumen."
+    die "Abortando: no agrego un root folder donde Radarr no puede escribir."
+}
+add_root_folder() {
+    assert_media_dir_writable "$RADARR_ROOT_FOLDER"
 
     # Idempotencia: ¿ya esta cargado ese path?
     if api_call GET "$RADARR_URL/api/v3/rootfolder"; then
@@ -380,6 +463,12 @@ add_root_folder() {
         die "No se pudo agregar el root folder. Ver $LOG_FILE"
     fi
 }
+
+# La carpeta de descargas tiene el mismo problema de dueño, pero se manifiesta
+# mas tarde y peor: el root folder se agrega bien y recien falla al importar
+# ("Couldn't import" en Activity → Queue). Radarr necesita escribir ahi para
+# hacer el hardlink de downloads/ -> movies/.
+assert_media_dir_writable "${MEDIA_CTR_DIR}/downloads"
 add_root_folder
 
 logfile "=== configure-stack.sh finalizado OK ==="
