@@ -21,6 +21,7 @@
 # Si ya existen (caso normal: sourceado desde configure-stack.sh), se respetan
 # las del orquestador. Si no (lib usada sola), se definen iguales.
 declare -F log     >/dev/null || log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
+declare -F info    >/dev/null || info() { echo -e "  \033[1;36m->\033[0m $*"; }
 declare -F warn    >/dev/null || warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
 declare -F die     >/dev/null || die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 declare -F logfile >/dev/null || logfile() {
@@ -79,14 +80,17 @@ servarr_api_key() {
 }
 
 # =========================================================================
-#  servarr_wait_ready <nombre> <url> <key>
+#  servarr_wait_ready <nombre> <url> <key> [api_version]
 #  Espera hasta 60s (30 intentos x 2s) a que /system/status responda 2xx.
+#
+#  api_version por defecto es v3 (Radarr y Sonarr). PROWLARR USA v1: no comparte
+#  el versionado de API con el resto aunque comparta la base de codigo.
 # =========================================================================
 servarr_wait_ready() {
-    local name="$1" url="$2" key="$3" i
-    log "Esperando a que $name responda..."
+    local name="$1" url="$2" key="$3" api="${4:-v3}" i
+    info "Esperando a que $name responda..."
     for i in {1..30}; do
-        servarr_api GET "$url/api/v3/system/status" "$key" && { log "$name OK"; return 0; }
+        servarr_api GET "$url/api/$api/system/status" "$key" && { info "$name OK"; return 0; }
         sleep 2
     done
     die "$name no respondio despues de 60s. Ver $LOG_FILE"
@@ -110,11 +114,11 @@ servarr_apply_external_auth() {
     [[ -f "$xml" ]] || die "No encuentro $xml"
 
     if grep -qF '<AuthenticationMethod>External</AuthenticationMethod>' "$xml"; then
-        log "Auth de $container ya esta en External. No se toca."
+        info "Auth de $container ya esta en External. No se toca."
         return 0
     fi
 
-    log "Parando $container para editar su config..."
+    info "Parando $container para editar su config..."
     $DC stop "$container" >/dev/null
     logfile "$container detenido para editar $xml"
     cp -a "$xml" "${xml}.bak.$(date +%s)"
@@ -134,10 +138,10 @@ servarr_apply_external_auth() {
     unset _SA_M _SA_R
 
     logfile "AuthenticationMethod=External escrito en $xml"
-    log "Arrancando $container..."
+    info "Arrancando $container..."
     $DC start "$container" >/dev/null
     sleep 5
-    log "Auth de $container en External (sin login; Tailscale es la capa de acceso)."
+    info "Auth de $container en External (sin login; Tailscale es la capa de acceso)."
 }
 
 # =========================================================================
@@ -157,7 +161,7 @@ servarr_assert_dir_writable() {
     host_path="$(ctr_to_host_path "$ctr_path")"
 
     if docker exec -u "$PUID" "$container" test -w "$ctr_path" 2>/dev/null; then
-        log "Permisos OK: $container puede escribir en $ctr_path"
+        info "Permisos OK: $container puede escribir en $ctr_path"
         return 0
     fi
 
@@ -183,7 +187,7 @@ servarr_ensure_host_dir() {
     host_path="$(ctr_to_host_path "$ctr_path")"
 
     if [[ ! -d "$host_path" ]]; then
-        log "Creando $host_path en el host..."
+        info "Creando $host_path en el host..."
         mkdir -p "$host_path" || die "No pude crear $host_path"
         logfile "mkdir -p $host_path"
     fi
@@ -216,11 +220,11 @@ servarr_register_root_folder() {
 
     payload="$(jq -n --arg path "$ctr_path" '{ path: $path }')"
 
-    log "Agregando el root folder a $name..."
+    info "Agregando el root folder a $name..."
     if servarr_api POST "$url/api/v3/rootfolder" "$key" "$payload"; then
         new_id="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
         free="$(echo "$HTTP_BODY" | jq -r '.freeSpace // empty')"
-        log "Root folder '$ctr_path' agregado a $name (id ${new_id:-?})"
+        info "Root folder '$ctr_path' agregado a $name (id ${new_id:-?})"
         [[ -n "$free" ]] && echo "  Espacio libre: $(( free / 1024 / 1024 / 1024 )) GB"
     else
         warn "Fallo al agregar el root folder en $name (HTTP $HTTP_CODE):"

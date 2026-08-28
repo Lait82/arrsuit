@@ -15,6 +15,12 @@
 #    5. Crea el root folder de Radarr (biblioteca de peliculas) via API REST.
 #    6. Configura Sonarr igual que Radarr (auth, download client, root folder),
 #       llamando a las funciones de scripts/configure-sonarr.sh.
+#    7. Configura Prowlarr (auth, proxy FlareSolverr, y lo conecta a Radarr y
+#       Sonarr) via scripts/configure-prowlarr.sh. Va ultimo porque necesita
+#       las API keys de los otros dos.
+#
+#  LO QUE NO HACE: cargar indexers en Prowlarr. Cada indexer tiene campos
+#  propios y varios piden credenciales -> queda manual en la UI.
 #
 #  ARQUITECTURA: este archivo es el ORQUESTADOR. Define los pasos y llama
 #  funciones; los servicios nuevos van en scripts/ y se sourcean, no se copian
@@ -35,7 +41,13 @@ CONF_FILE="$SCRIPT_DIR/configs/services_setup.conf"
 ENV_FILE="$SCRIPT_DIR/.env"
 LOG_FILE="$SCRIPT_DIR/configure-stack.log"
 
+# Jerarquia visual de la salida:
+#   log()  ==> verde, con linea en blanco arriba -> PASOS GRANDES (los "N/8")
+#   info() ->  cyan, indentado               -> pasos intermedios y detalle
+#   warn() [!] amarillo                      -> algo que hay que mirar
+#   die()  [x] rojo, a stderr                -> fatal
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
+info() { echo -e "  \033[1;36m->\033[0m $*"; }
 warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
 die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 logfile() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
@@ -77,7 +89,7 @@ PGID=1000
 command -v curl >/dev/null || die "Falta curl."
 command -v docker >/dev/null || die "Falta docker."
 if ! command -v jq >/dev/null; then
-    log "Instalando jq..."
+    info "Instalando jq..."
     apt-get install -y -qq jq || die "No pude instalar jq. Instalalo: apt install jq"
 fi
 
@@ -119,7 +131,8 @@ esac
 # HTTP_CODE/HTTP_BODY. Cada modulo solo DEFINE funciones: no corre nada al
 # cargarse, asi el orden de ejecucion lo sigue decidiendo este archivo.
 for _mod in "$SCRIPT_DIR/scripts/lib/common.sh" \
-            "$SCRIPT_DIR/scripts/configure-sonarr.sh"; do
+            "$SCRIPT_DIR/scripts/configure-sonarr.sh" \
+            "$SCRIPT_DIR/scripts/configure-prowlarr.sh"; do
     [[ -f "$_mod" ]] || die "Falta el modulo $_mod"
     # shellcheck disable=SC1090
     source "$_mod"
@@ -147,7 +160,7 @@ api_call() {
 }
 
 # =========================================================================
-log "1/7 Preparando el arbol de carpetas en el host"
+log "1/8 Preparando el arbol de carpetas en el host"
 # =========================================================================
 # ESTO VA ANTES DE 'docker compose up'. Si el destino de un bind mount no
 # existe, Docker lo crea root:root 755 y despues los contenedores (que corren
@@ -175,7 +188,7 @@ prepare_media_tree() {
              "$MEDIA_HOST_DIR/movies" "$MEDIA_HOST_DIR/series"\
              "$(ctr_to_host_path "$RADARR_ROOT_FOLDER")" "/srv/config"; do
         if [[ ! -d "$d" ]]; then
-            log "Creando $d"
+            info "Creando $d"
             mkdir -p "$d" || die "No pude crear $d"
             logfile "mkdir -p $d"
         fi
@@ -185,11 +198,11 @@ prepare_media_tree() {
     # una biblioteca grande cuando ya esta todo bien (que es el caso normal).
     if find "$MEDIA_HOST_DIR" \( -not -uid "$PUID" -o -not -gid "$PGID" \) \
         -print -quit 2>/dev/null | grep -q .; then
-        log "Ajustando dueño de $MEDIA_HOST_DIR -> ${PUID}:${PGID} (puede tardar si hay muchos archivos)"
+        info "Ajustando dueño de $MEDIA_HOST_DIR -> ${PUID}:${PGID} (puede tardar si hay muchos archivos)"
         chown -R "${PUID}:${PGID}" "$MEDIA_HOST_DIR" || die "Fallo el chown de $MEDIA_HOST_DIR"
         logfile "chown -R ${PUID}:${PGID} $MEDIA_HOST_DIR"
     else
-        log "Dueño de $MEDIA_HOST_DIR ya es correcto (${PUID}:${PGID})"
+        info "Dueño de $MEDIA_HOST_DIR ya es correcto (${PUID}:${PGID})"
     fi
 
     # setgid en los directorios: lo que se cree adentro hereda el grupo, asi
@@ -200,20 +213,20 @@ prepare_media_tree() {
 prepare_media_tree
 
 # =========================================================================
-log "2/7 Levantando el stack (si hace falta)"
+log "2/8 Levantando el stack (si hace falta)"
 # =========================================================================
 cd "$SCRIPT_DIR"
 if $DC ps --status running 2>/dev/null | grep -q "$QBIT_CONTAINER"; then
-    log "El stack ya esta arriba."
+    info "El stack ya esta arriba."
 else
-    log "Levantando contenedores..."
+    info "Levantando contenedores..."
     $DC up -d
-    log "Esperando 10s a que los servicios arranquen..."
+    info "Esperando 10s a que los servicios arranquen..."
     sleep 10
 fi
 
 # =========================================================================
-log "3/7 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
+log "3/8 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
 # =========================================================================
 # qBittorrent reescribe su .conf al apagarse, asi que hay que:
 #   parar el contenedor -> editar el archivo -> arrancarlo.
@@ -225,11 +238,11 @@ apply_qbit_bypass() {
     # ¿Ya esta aplicado? (grep -F: match literal, no interpreta el backslash)
     if grep -qF 'WebUI\AuthSubnetWhitelistEnabled=true' "$QBIT_CONF" \
        && grep -qF "WebUI\\AuthSubnetWhitelist=$MEDIA_SUBNET" "$QBIT_CONF"; then
-        log "El bypass ya esta aplicado ($MEDIA_SUBNET). No se toca qBittorrent."
+        info "El bypass ya esta aplicado ($MEDIA_SUBNET). No se toca qBittorrent."
         return 0
     fi
 
-    log "Parando qBittorrent para editar su config..."
+    info "Parando qBittorrent para editar su config..."
     $DC stop "$QBIT_CONTAINER" >/dev/null
     logfile "qbittorrent detenido para editar $QBIT_CONF"
 
@@ -278,15 +291,15 @@ apply_qbit_bypass() {
     # set_conf_key 'WebUI\HostHeaderValidation' 'false'
 
     logfile "Bypass escrito en $QBIT_CONF"
-    log "Arrancando qBittorrent..."
+    info "Arrancando qBittorrent..."
     $DC start "$QBIT_CONTAINER" >/dev/null
     sleep 5
-    log "Bypass aplicado para $MEDIA_SUBNET."
+    info "Bypass aplicado para $MEDIA_SUBNET."
 }
 apply_qbit_bypass
 
 # =========================================================================
-log "4/7 Configurando auth de Radarr (External: la maneja Tailscale)"
+log "4/8 Configurando auth de Radarr (External: la maneja Tailscale)"
 # =========================================================================
 # Radarr no considera la IP de Tailscale como "local", asi que
 # "Disabled for Local Addresses" NO sirve (te pide login igual).
@@ -302,11 +315,11 @@ apply_radarr_auth() {
 
     # ¿Ya esta en External? (idempotencia)
     if grep -qF '<AuthenticationMethod>External</AuthenticationMethod>' "$RADARR_CONFIG_XML"; then
-        log "Auth de Radarr ya esta en External. No se toca."
+        info "Auth de Radarr ya esta en External. No se toca."
         return 0
     fi
 
-    log "Parando Radarr para editar su config..."
+    info "Parando Radarr para editar su config..."
     $DC stop radarr >/dev/null
     logfile "radarr detenido para editar $RADARR_CONFIG_XML"
     cp -a "$RADARR_CONFIG_XML" "${RADARR_CONFIG_XML}.bak.$(date +%s)"
@@ -328,15 +341,15 @@ apply_radarr_auth() {
     unset _RA_M _RA_R
 
     logfile "AuthenticationMethod=External escrito en $RADARR_CONFIG_XML"
-    log "Arrancando Radarr..."
+    info "Arrancando Radarr..."
     $DC start radarr >/dev/null
     sleep 5
-    log "Auth de Radarr en External (sin login; Tailscale es la capa de acceso)."
+    info "Auth de Radarr en External (sin login; Tailscale es la capa de acceso)."
 }
 apply_radarr_auth
 
 # =========================================================================
-log "5/7 Conectando Radarr -> qBittorrent"
+log "5/8 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
@@ -350,9 +363,9 @@ echo "  Radarr         : $RADARR_URL"
 echo "  Log            : $LOG_FILE"
 
 # Esperar a Radarr
-log "Esperando a que Radarr responda..."
+info "Esperando a que Radarr responda..."
 for i in {1..30}; do
-    api_call GET "$RADARR_URL/api/v3/system/status" && { log "Radarr OK"; break; }
+    api_call GET "$RADARR_URL/api/v3/system/status" && { info "Radarr OK"; break; }
     [[ $i -eq 30 ]] && die "Radarr no respondio. Ver $LOG_FILE"
     sleep 2
 done
@@ -393,9 +406,9 @@ PAYLOAD="$(jq -n \
     }')"
 
 # Test antes de guardar
-log "Probando la conexion (endpoint /test)..."
+info "Probando la conexion (endpoint /test)..."
 if api_call POST "$RADARR_URL/api/v3/downloadclient/test" "$PAYLOAD"; then
-    log "Test OK: Radarr alcanza a qBittorrent."
+    info "Test OK: Radarr alcanza a qBittorrent."
 else
     warn "El test fallo (HTTP $HTTP_CODE):"
     echo "$HTTP_BODY" | jq -r '.[]? | "  - \(.propertyName): \(.errorMessage) (\(.detailedDescription // ""))"' 2>/dev/null || echo "  $HTTP_BODY"
@@ -404,10 +417,10 @@ else
 fi
 
 # Guardar
-log "Agregando el download client..."
+info "Agregando el download client..."
 if api_call POST "$RADARR_URL/api/v3/downloadclient" "$PAYLOAD"; then
     NEW_ID="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
-    log "Download client '$TC_NAME' agregado (id ${NEW_ID:-?})"
+    info "Download client '$TC_NAME' agregado (id ${NEW_ID:-?})"
 else
     warn "Fallo al agregar (HTTP $HTTP_CODE):"
     echo "$HTTP_BODY" | jq -r '.[]? | "  - \(.propertyName): \(.errorMessage)"' 2>/dev/null || echo "  $HTTP_BODY"
@@ -417,12 +430,12 @@ fi
 add_download_client
 
 # =========================================================================
-log "6/7 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
+log "6/8 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
 # =========================================================================
 # Sin root folder, Radarr no puede agregar ni una pelicula: es donde organiza
 # la biblioteca. Tiene que estar DENTRO del mismo filesystem que /data/downloads
 # para que el move de qBittorrent -> biblioteca sea hardlink y no copia.
-# Verificacion (NO reparacion: de los permisos se encarga el paso 1/7).
+# Verificacion (NO reparacion: de los permisos se encarga el paso 1/8).
 # Existe porque es el unico chequeo hecho DESDE ADENTRO del contenedor, que es
 # donde la respuesta cuenta. Un chequeo en el host no puede ver: un bind
 # montado :ro, un mount que fallo y dejo /data vacio, SELinux sin labels :z, o
@@ -436,12 +449,12 @@ assert_media_dir_writable() {
     host_path="$(ctr_to_host_path "$ctr_path")"
 
     if docker exec -u "$PUID" radarr test -w "$ctr_path" 2>/dev/null; then
-        log "Permisos OK: Radarr puede escribir en $ctr_path"
+        info "Permisos OK: Radarr puede escribir en $ctr_path"
         return 0
     fi
 
     warn "Radarr (uid $PUID / 'abc') no puede escribir en $ctr_path"
-    warn "El paso 1/7 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
+    warn "El paso 1/8 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
     warn "Revisá, en este orden:"
     warn "  1) que el bind este montado y no sea read-only:"
     warn "       docker exec radarr mount | grep /data"
@@ -470,12 +483,12 @@ add_root_folder() {
     local payload
     payload="$(jq -n --arg path "$RADARR_ROOT_FOLDER" '{ path: $path }')"
 
-    log "Agregando el root folder..."
+    info "Agregando el root folder..."
     if api_call POST "$RADARR_URL/api/v3/rootfolder" "$payload"; then
         local new_id free
         new_id="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
         free="$(echo "$HTTP_BODY" | jq -r '.freeSpace // empty')"
-        log "Root folder '$RADARR_ROOT_FOLDER' agregado (id ${new_id:-?})"
+        info "Root folder '$RADARR_ROOT_FOLDER' agregado (id ${new_id:-?})"
         [[ -n "$free" ]] && echo "  Espacio libre: $(( free / 1024 / 1024 / 1024 )) GB"
     else
         warn "Fallo al agregar el root folder (HTTP $HTTP_CODE):"
@@ -492,7 +505,7 @@ assert_media_dir_writable "${MEDIA_CTR_DIR}/downloads"
 add_root_folder
 
 # =========================================================================
-log "7/7 Configurando Sonarr"
+log "7/8 Configurando Sonarr"
 # =========================================================================
 # Las funciones viven en scripts/configure-sonarr.sh (sourceado arriba).
 # El orden importa: apply_auth reinicia Sonarr, wait_ready espera a que vuelva
@@ -502,8 +515,22 @@ sonarr_wait_ready
 sonarr_add_download_client
 sonarr_add_root_folder
 
+# =========================================================================
+log "8/8 Configurando Prowlarr"
+# =========================================================================
+# Va ULTIMO a proposito: Prowlarr se conecta hacia Radarr y Sonarr y necesita
+# las API keys de los dos, asi que ambos tienen que existir y responder antes.
+# Funciones en scripts/configure-prowlarr.sh.
+prowlarr_apply_auth
+prowlarr_wait_ready
+prowlarr_add_flaresolverr
+prowlarr_connect_apps
+
 logfile "=== configure-stack.sh finalizado OK ==="
-log "Listo. Radarr y Sonarr conectados a qBittorrent."
+log "Listo. Stack configurado."
 echo "  Peliculas : $RADARR_ROOT_FOLDER"
 echo "  Series    : $SONARR_ROOT_FOLDER"
-log "Log en $LOG_FILE"
+echo "  Paneles   : http://${TAILSCALE_IP}:{7878 radarr, 8989 sonarr, 9696 prowlarr, 8080 qbit}"
+info "Log en $LOG_FILE"
+warn "Falta un paso manual: cargar los indexers en Prowlarr (Indexers -> Add Indexer)."
+warn "A los que esten detras de Cloudflare, poneles el tag '$FLARESOLVERR_TAG'."

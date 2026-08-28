@@ -110,9 +110,9 @@ sonarr_add_download_client() {
         }')"
 
     # Test antes de guardar: no dejamos guardado un cliente que no conecta.
-    log "Probando la conexion Sonarr -> qBittorrent (endpoint /test)..."
+    info "Probando la conexion Sonarr -> qBittorrent (endpoint /test)..."
     if servarr_api POST "$SONARR_URL/api/v3/downloadclient/test" "$SONARR_API_KEY" "$payload"; then
-        log "Test OK: Sonarr alcanza a qBittorrent."
+        info "Test OK: Sonarr alcanza a qBittorrent."
     else
         warn "El test fallo (HTTP $HTTP_CODE):"
         servarr_print_errors
@@ -120,10 +120,10 @@ sonarr_add_download_client() {
         die "Abortando: no guardo un download client que no conecta."
     fi
 
-    log "Agregando el download client a Sonarr..."
+    info "Agregando el download client a Sonarr..."
     if servarr_api POST "$SONARR_URL/api/v3/downloadclient" "$SONARR_API_KEY" "$payload"; then
         new_id="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
-        log "Download client '$TC_NAME' agregado a Sonarr (id ${new_id:-?})"
+        info "Download client '$TC_NAME' agregado a Sonarr (id ${new_id:-?})"
     else
         warn "Fallo al agregar (HTTP $HTTP_CODE):"
         servarr_print_errors
