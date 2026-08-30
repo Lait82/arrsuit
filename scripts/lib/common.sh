@@ -44,7 +44,7 @@ declare -F ctr_to_host_path >/dev/null || ctr_to_host_path() {
 servarr_api() {
     local method="$1" url="$2" key="$3" data="${4:-}"
     local tmp_body; tmp_body="$(mktemp)"
-    local curl_args=(-sS -X "$method"
+    local curl_args=(-sSg -X "$method"
         -H "X-Api-Key: $key"
         -H "Content-Type: application/json"
         -o "$tmp_body" -w '%{http_code}')
