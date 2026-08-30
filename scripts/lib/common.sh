@@ -195,6 +195,52 @@ servarr_ensure_host_dir() {
 }
 
 # =========================================================================
+#  servarr_upsert_download_client <app> <url> <key> <nombre_cliente> <payload>
+#
+#  Agrega un download client a una app Servarr. Sirve para cualquier cliente
+#  (qBittorrent, SABnzbd, lo que venga): el payload lo arma quien llama, esto
+#  se encarga del ciclo idempotencia -> test -> guardar.
+#
+#  Siempre prueba con /test ANTES de guardar: no dejamos configurado un cliente
+#  que no conecta, porque despues falla en silencio a la hora de descargar.
+# =========================================================================
+servarr_upsert_download_client() {
+    local app="$1" url="$2" key="$3" client="$4" payload="$5"
+    local existing new_id
+
+    if servarr_api GET "$url/api/v3/downloadclient" "$key"; then
+        existing="$(echo "$HTTP_BODY" | jq -r --arg n "$client" \
+            '.[] | select(.name == $n) | .id' | head -n1 || true)"
+        if [[ -n "$existing" ]]; then
+            warn "'$client' ya existe en $app (id $existing). No se duplica."
+            logfile "$app: download client '$client' ya existe (id $existing)."
+            return 0
+        fi
+    else
+        die "No pude listar download clients de $app (HTTP $HTTP_CODE). Ver $LOG_FILE"
+    fi
+
+    info "Probando $app -> $client (endpoint /test)..."
+    if servarr_api POST "$url/api/v3/downloadclient/test" "$key" "$payload"; then
+        info "Test OK: $app alcanza a $client."
+    else
+        warn "El test de $client contra $app fallo (HTTP $HTTP_CODE):"
+        servarr_print_errors
+        die "Abortando: no guardo un download client que no conecta."
+    fi
+
+    info "Agregando $client a $app..."
+    if servarr_api POST "$url/api/v3/downloadclient" "$key" "$payload"; then
+        new_id="$(echo "$HTTP_BODY" | jq -r '.id // empty')"
+        info "'$client' agregado a $app (id ${new_id:-?})"
+    else
+        warn "Fallo al agregar $client a $app (HTTP $HTTP_CODE):"
+        servarr_print_errors
+        die "No se pudo agregar $client a $app. Ver $LOG_FILE"
+    fi
+}
+
+# =========================================================================
 #  servarr_register_root_folder <nombre> <url> <key> <ctr_path>
 #  Idempotente: si el path ya esta cargado, no lo duplica.
 #

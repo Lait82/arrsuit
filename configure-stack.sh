@@ -15,12 +15,18 @@
 #    5. Crea el root folder de Radarr (biblioteca de peliculas) via API REST.
 #    6. Configura Sonarr igual que Radarr (auth, download client, root folder),
 #       llamando a las funciones de scripts/configure-sonarr.sh.
-#    7. Configura Prowlarr (auth, proxy FlareSolverr, y lo conecta a Radarr y
+#    7. Configura SABnzbd (usenet) y lo conecta como download client a Radarr
+#       y Sonarr, en paralelo a qBittorrent. El stack soporta los dos
+#       protocolos a la vez. Via scripts/configure-sabnzbd.sh.
+#    8. Configura Prowlarr (auth, proxy FlareSolverr, y lo conecta a Radarr y
 #       Sonarr) via scripts/configure-prowlarr.sh. Va ultimo porque necesita
 #       las API keys de los otros dos.
 #
-#  LO QUE NO HACE: cargar indexers en Prowlarr. Cada indexer tiene campos
-#  propios y varios piden credenciales -> queda manual en la UI.
+#  LO QUE NO HACE (queda manual, son credenciales personales):
+#    - Cargar indexers en Prowlarr: cada uno tiene campos propios.
+#    - Cargar el proveedor de Usenet en SABnzbd (Config -> Servers). Sin eso
+#      SABnzbd no baja nada: el indexer dice DONDE esta, el proveedor es DE
+#      DONDE se baja, y son dos suscripciones distintas.
 #
 #  ARQUITECTURA: este archivo es el ORQUESTADOR. Define los pasos y llama
 #  funciones; los servicios nuevos van en scripts/ y se sourcean, no se copian
@@ -42,7 +48,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 LOG_FILE="$SCRIPT_DIR/configure-stack.log"
 
 # Jerarquia visual de la salida:
-#   log()  ==> verde, con linea en blanco arriba -> PASOS GRANDES (los "N/8")
+#   log()  ==> verde, con linea en blanco arriba -> PASOS GRANDES (los "N/9")
 #   info() ->  cyan, indentado               -> pasos intermedios y detalle
 #   warn() [!] amarillo                      -> algo que hay que mirar
 #   die()  [x] rojo, a stderr                -> fatal
@@ -132,6 +138,7 @@ esac
 # cargarse, asi el orden de ejecucion lo sigue decidiendo este archivo.
 for _mod in "$SCRIPT_DIR/scripts/lib/common.sh" \
             "$SCRIPT_DIR/scripts/configure-sonarr.sh" \
+            "$SCRIPT_DIR/scripts/configure-sabnzbd.sh" \
             "$SCRIPT_DIR/scripts/configure-prowlarr.sh"; do
     [[ -f "$_mod" ]] || die "Falta el modulo $_mod"
     # shellcheck disable=SC1090
@@ -160,7 +167,7 @@ api_call() {
 }
 
 # =========================================================================
-log "1/8 Preparando el arbol de carpetas en el host"
+log "1/9 Preparando el arbol de carpetas en el host"
 # =========================================================================
 # ESTO VA ANTES DE 'docker compose up'. Si el destino de un bind mount no
 # existe, Docker lo crea root:root 755 y despues los contenedores (que corren
@@ -213,20 +220,31 @@ prepare_media_tree() {
 prepare_media_tree
 
 # =========================================================================
-log "2/8 Levantando el stack (si hace falta)"
+log "2/9 Levantando el stack (si hace falta)"
 # =========================================================================
 cd "$SCRIPT_DIR"
-if $DC ps --status running 2>/dev/null | grep -q "$QBIT_CONTAINER"; then
-    info "El stack ya esta arriba."
-else
-    info "Levantando contenedores..."
-    $DC up -d
-    info "Esperando 10s a que los servicios arranquen..."
+# 'up -d' SIEMPRE, no solo cuando el stack esta abajo. Es idempotente: crea lo
+# que falta, recrea lo que cambio de config y no toca el resto.
+#
+# Antes esto estaba detras de un "¿esta corriendo qbittorrent?" y se salteaba
+# entero si el stack ya estaba arriba. Consecuencia: al agregar un servicio
+# nuevo al compose (SABnzbd fue el caso), el contenedor NUNCA se creaba y los
+# pasos siguientes fallaban buscando un .ini que no existia.
+_running_before="$($DC ps --status running --quiet 2>/dev/null | wc -l)"
+info "Sincronizando el stack con el compose ($_running_before contenedores arriba)..."
+$DC up -d
+_running_after="$($DC ps --status running --quiet 2>/dev/null | wc -l)"
+
+if [[ "$_running_after" -gt "$_running_before" ]]; then
+    info "Arrancaron $(( _running_after - _running_before )) contenedores nuevos. Esperando 10s..."
     sleep 10
+else
+    info "El stack ya estaba al dia ($_running_after contenedores)."
 fi
+unset _running_before _running_after
 
 # =========================================================================
-log "3/8 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
+log "3/9 Configurando bypass de auth de qBittorrent (red $MEDIA_SUBNET)"
 # =========================================================================
 # qBittorrent reescribe su .conf al apagarse, asi que hay que:
 #   parar el contenedor -> editar el archivo -> arrancarlo.
@@ -299,7 +317,7 @@ apply_qbit_bypass() {
 apply_qbit_bypass
 
 # =========================================================================
-log "4/8 Configurando auth de Radarr (External: la maneja Tailscale)"
+log "4/9 Configurando auth de Radarr (External: la maneja Tailscale)"
 # =========================================================================
 # Radarr no considera la IP de Tailscale como "local", asi que
 # "Disabled for Local Addresses" NO sirve (te pide login igual).
@@ -349,7 +367,7 @@ apply_radarr_auth() {
 apply_radarr_auth
 
 # =========================================================================
-log "5/8 Conectando Radarr -> qBittorrent"
+log "5/9 Conectando Radarr -> qBittorrent"
 # =========================================================================
 [[ -f "$RADARR_CONFIG_XML" ]] || die "No encuentro $RADARR_CONFIG_XML"
 RADARR_API_KEY="$(grep -oP '(?<=<ApiKey>)[^<]+' "$RADARR_CONFIG_XML" || true)"
@@ -430,12 +448,12 @@ fi
 add_download_client
 
 # =========================================================================
-log "6/8 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
+log "6/9 Configurando root folder de Radarr ($RADARR_ROOT_FOLDER)"
 # =========================================================================
 # Sin root folder, Radarr no puede agregar ni una pelicula: es donde organiza
 # la biblioteca. Tiene que estar DENTRO del mismo filesystem que /data/downloads
 # para que el move de qBittorrent -> biblioteca sea hardlink y no copia.
-# Verificacion (NO reparacion: de los permisos se encarga el paso 1/8).
+# Verificacion (NO reparacion: de los permisos se encarga el paso 1/9).
 # Existe porque es el unico chequeo hecho DESDE ADENTRO del contenedor, que es
 # donde la respuesta cuenta. Un chequeo en el host no puede ver: un bind
 # montado :ro, un mount que fallo y dejo /data vacio, SELinux sin labels :z, o
@@ -454,7 +472,7 @@ assert_media_dir_writable() {
     fi
 
     warn "Radarr (uid $PUID / 'abc') no puede escribir en $ctr_path"
-    warn "El paso 1/8 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
+    warn "El paso 1/9 dejo $host_path como ${PUID}:${PGID}, asi que no es el dueño."
     warn "Revisá, en este orden:"
     warn "  1) que el bind este montado y no sea read-only:"
     warn "       docker exec radarr mount | grep /data"
@@ -505,7 +523,7 @@ assert_media_dir_writable "${MEDIA_CTR_DIR}/downloads"
 add_root_folder
 
 # =========================================================================
-log "7/8 Configurando Sonarr"
+log "7/9 Configurando Sonarr"
 # =========================================================================
 # Las funciones viven en scripts/configure-sonarr.sh (sourceado arriba).
 # El orden importa: apply_auth reinicia Sonarr, wait_ready espera a que vuelva
@@ -516,7 +534,17 @@ sonarr_add_download_client
 sonarr_add_root_folder
 
 # =========================================================================
-log "8/8 Configurando Prowlarr"
+log "8/9 Configurando SABnzbd (usenet)"
+# =========================================================================
+# Va DESPUES de Radarr y Sonarr porque se conecta a los dos y necesita sus
+# API keys y URLs, que quedaron seteadas en los pasos 5 y 7.
+# Funciones en scripts/configure-sabnzbd.sh.
+sabnzbd_wait_ready
+sabnzbd_configure
+sabnzbd_connect_apps
+
+# =========================================================================
+log "9/9 Configurando Prowlarr"
 # =========================================================================
 # Va ULTIMO a proposito: Prowlarr se conecta hacia Radarr y Sonarr y necesita
 # las API keys de los dos, asi que ambos tienen que existir y responder antes.
@@ -530,7 +558,15 @@ logfile "=== configure-stack.sh finalizado OK ==="
 log "Listo. Stack configurado."
 echo "  Peliculas : $RADARR_ROOT_FOLDER"
 echo "  Series    : $SONARR_ROOT_FOLDER"
-echo "  Paneles   : http://${TAILSCALE_IP}:{7878 radarr, 8989 sonarr, 9696 prowlarr, 8080 qbit}"
+echo "  Descargas : torrent via qBittorrent + usenet via SABnzbd"
+echo
+echo "  Paneles (por Tailscale, http://${TAILSCALE_IP}:PUERTO):"
+echo "    7878 Radarr    8989 Sonarr    9696 Prowlarr"
+echo "    8080 qBittorrent    ${SAB_PORT} SABnzbd    6767 Bazarr    5055 Jellyseerr"
 info "Log en $LOG_FILE"
-warn "Falta un paso manual: cargar los indexers en Prowlarr (Indexers -> Add Indexer)."
-warn "A los que esten detras de Cloudflare, poneles el tag '$FLARESOLVERR_TAG'."
+
+warn "Faltan dos pasos manuales (son credenciales personales, no se automatizan):"
+warn "  1) Indexers en Prowlarr (Indexers -> Add Indexer). A los que esten"
+warn "     detras de Cloudflare, poneles el tag '$FLARESOLVERR_TAG'."
+warn "  2) Proveedor de Usenet en SABnzbd (Config -> Servers). SIN ESTO SABnzbd"
+warn "     no baja nada, por mas que Radarr y Sonarr le manden trabajo."

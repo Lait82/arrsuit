@@ -92,6 +92,36 @@ services:
     restart: unless-stopped
 
   # -----------------------------------------------------------------------
+  # SABnzbd - cliente de descargas USENET (el equivalente de qBittorrent
+  # para NZB). Radarr y Sonarr manejan los dos protocolos a la vez.
+  #
+  # NO va detras de gluetun, a diferencia de qBittorrent: Usenet es SSL
+  # directo contra tu proveedor, no es P2P. No hay swarm publico donde tu IP
+  # quede expuesta, asi que la VPN no compra nada y solo agrega latencia.
+  #
+  # PUERTO: adentro escucha en 8080 igual que qBittorrent, asi que afuera se
+  # publica en 8081 para no chocar con el bind de gluetun.
+  #
+  # VOLUMEN: monta /srv/media como /data igual que Radarr/Sonarr. Es lo que
+  # permite el hardlink de downloads/ -> movies/ (mismo filesystem). Si le
+  # montaras solo la carpeta de descargas, perderias el hardlink.
+  # -----------------------------------------------------------------------
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    networks: [media]
+    ports:
+      - "${TAILSCALE_IP}:8081:8080"   # solo Tailscale (8081 afuera: 8080 lo usa qbit)
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /srv/config/sabnzbd:/config
+      - /srv/media:/data
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
   # Prowlarr - gestor central de indexers
   # -----------------------------------------------------------------------
   prowlarr:
