@@ -46,7 +46,7 @@ sab_api() {
 
     # La key va en la URL: se enmascara en el log para no dejarla en claro.
     logfile "--- REQUEST: GET ${url//$SAB_API_KEY/<APIKEY>}"
-    HTTP_CODE="$(curl -sS -G -o "$tmp_body" -w '%{http_code}' "$url" 2>>"$LOG_FILE")" \
+    HTTP_CODE="$(curl -sS -G -g -o "$tmp_body" -w '%{http_code}' "$url" 2>>"$LOG_FILE")" \
         || HTTP_CODE="000"
     HTTP_BODY="$(cat "$tmp_body")"; rm -f "$tmp_body"
     logfile "    HTTP_CODE: $HTTP_CODE"
