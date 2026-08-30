@@ -154,6 +154,7 @@ Desde cualquier dispositivo en tu tailnet, usá la IP Tailscale de la VPS
 | Servicio    | Puerto |
 |-------------|--------|
 | qBittorrent | 8080   |
+| SABnzbd     | 8081   |
 | Prowlarr    | 9696   |
 | Radarr      | 7878   |
 | Sonarr      | 8989   |

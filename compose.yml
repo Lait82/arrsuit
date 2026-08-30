@@ -1,6 +1,6 @@
 # =========================================================================
 #  Media stack para VPS (CPU-only) - Manu
-#  Gluetun (ProtonVPN/WireGuard) -> qBittorrent
+#  Gluetun (ProtonVPN/WireGuard) -> qBittorrent   |   SABnzbd (usenet, directo)
 #  Prowlarr, Radarr, Sonarr, Bazarr, Jellyseerr, Tdarr, Recyclarr, FlareSolverr
 #  Jellyfin -> unico servicio expuesto (via nginx en :80, geo-bloqueo AR)
 #
@@ -9,7 +9,9 @@
 #  BINDS DE SEGURIDAD:
 #    - Jellyfin: 127.0.0.1  -> solo lo alcanza nginx (que aplica geo + rate limit)
 #    - arr y paneles: ${TAILSCALE_IP} (IP Tailscale) -> solo vos, por el tailnet
-#    - qBittorrent WebUI: 127.0.0.1 -> por Tailscale via IP del host
+#    - qBittorrent WebUI: ${TAILSCALE_IP}:8080, publicado por gluetun porque
+#      qbit comparte su stack de red (network_mode: service:gluetun)
+#    - SABnzbd: ${TAILSCALE_IP}:8081 (UI) + 127.0.0.1:8081 (API del script)
 #    - Torrent (6881): sale por gluetun/ProtonVPN, no por la IP del VPS
 #
 #  La variable ${TAILSCALE_IP} la escribe setup-host.sh en el .env.
@@ -100,7 +102,13 @@ services:
   # quede expuesta, asi que la VPN no compra nada y solo agrega latencia.
   #
   # PUERTO: adentro escucha en 8080 igual que qBittorrent, asi que afuera se
-  # publica en 8081 para no chocar con el bind de gluetun.
+  # publica en 8081 para no chocar con el bind de gluetun. Se publica en DOS
+  # IPs del host (Docker lo permite: mismo puerto, distinta interfaz):
+  #   - ${TAILSCALE_IP} -> para entrar vos con el navegador
+  #   - 127.0.0.1       -> para que configure-stack.sh le pegue a la API.
+  #     Va por loopback y no por Tailscale porque SABnzbd responde 403
+  #     ("External internet access denied") a todo lo que no venga de loopback
+  #     o RFC1918, y la IP de Tailscale es CGNAT (100.64.0.0/10), que no entra.
   #
   # VOLUMEN: monta /srv/media como /data igual que Radarr/Sonarr. Es lo que
   # permite el hardlink de downloads/ -> movies/ (mismo filesystem). Si le
@@ -111,7 +119,8 @@ services:
     container_name: sabnzbd
     networks: [media]
     ports:
-      - "${TAILSCALE_IP}:8081:8080"   # solo Tailscale (8081 afuera: 8080 lo usa qbit)
+      - "${TAILSCALE_IP}:8081:8080"   # UI por Tailscale (8081 afuera: 8080 lo usa qbit)
+      - "127.0.0.1:8081:8080"         # API para el script (evita el 403 de SABnzbd)
     environment:
       - PUID=1000
       - PGID=1000

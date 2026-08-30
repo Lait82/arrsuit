@@ -91,9 +91,18 @@ sabnzbd_wait_ready() {
     SAB_API_KEY="$(grep -oP '^api_key\s*=\s*\K\S+' "$SAB_INI" | head -n1 || true)"
     [[ -n "$SAB_API_KEY" ]] || die "No pude extraer api_key de $SAB_INI"
 
-    SAB_URL="http://${TAILSCALE_IP}:${SAB_PORT}"
+    # POR LOOPBACK Y NO POR LA IP DE TAILSCALE:
+    # SABnzbd rechaza con 403 "External internet access denied" todo lo que no
+    # venga de sus rangos locales (loopback + RFC1918). Pegandole a
+    # http://<TAILSCALE_IP>:8081 el paquete da la vuelta por la interfaz de
+    # Tailscale y SABnzbd ve como origen 100.64.x.x, que es CGNAT y NO es
+    # RFC1918 -> 403, aunque la request salga de la misma maquina.
+    # Por 127.0.0.1 el origen es local y no hay nada que configurar.
+    # El compose publica el puerto en las dos IPs justamente para esto.
+    SAB_URL="http://127.0.0.1:${SAB_PORT}"
 
-    echo "  SABnzbd      : $SAB_URL  (interno: ${SAB_INTERNAL_HOST}:${SAB_INTERNAL_PORT})"
+    echo "  SABnzbd (API): $SAB_URL"
+    echo "  SABnzbd (UI) : http://${TAILSCALE_IP}:${SAB_PORT}"
     echo "  Completos    : $SAB_COMPLETE_DIR"
     echo "  Incompletos  : $SAB_INCOMPLETE_DIR"
 
@@ -119,15 +128,21 @@ sab_set_config() {
 }
 
 # =========================================================================
-#  Configura SABnzbd: whitelist de host, carpetas y categorias.
+#  Configura SABnzbd: whitelist de host, carpetas y categorias. Todo por API:
+#  yendo por loopback el origen es local y SABnzbd no bloquea nada, asi que no
+#  hace falta tocar el .ini ni parar el contenedor.
 # =========================================================================
 sabnzbd_configure() {
     # --- host_whitelist ---------------------------------------------------
-    # LA TRAMPA CLASICA DE SABNZBD: rechaza cualquier request cuyo header Host
-    # sea un nombre que no conoce, con "Access denied - Hostname verification
-    # failed". Cuando Radarr le pega a http://sabnzbd:8080 el Host es 'sabnzbd',
-    # asi que hay que agregarlo o el download client no conecta nunca.
-    # (Por IP no falla, por eso este script si le puede pegar por la de Tailscale.)
+    # OJO: esto es un chequeo DISTINTO del de local_ranges. local_ranges mira
+    # la IP de origen; host_whitelist mira el header Host. Son dos filtros
+    # independientes y este sigue haciendo falta:
+    #
+    #   script  -> http://127.0.0.1:8081   Host es una IP    -> no se verifica
+    #   Radarr  -> http://sabnzbd:8080     Host es 'sabnzbd' -> SI se verifica
+    #
+    # Sin esto, Radarr y Sonarr reciben "Hostname verification failed" y el
+    # download client no conecta nunca.
     local current
     if sab_api get_config "section=misc&keyword=host_whitelist"; then
         current="$(echo "$HTTP_BODY" | jq -r '.config.misc.host_whitelist // ""')"
@@ -139,7 +154,7 @@ sabnzbd_configure() {
         info "host_whitelist ya incluye '$SAB_INTERNAL_HOST'. No se toca."
     else
         local nuevo="${current:+$current,}${SAB_INTERNAL_HOST}"
-        info "Agregando '$SAB_INTERNAL_HOST' al host_whitelist de SABnzbd..."
+        info "Agregando '$SAB_INTERNAL_HOST' al host_whitelist..."
         sab_set_config misc host_whitelist "value=${nuevo}"
     fi
 
