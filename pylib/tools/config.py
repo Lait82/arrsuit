@@ -108,6 +108,17 @@ class Config:
             env[key] = raw
         return env
 
+    def env(self, name: str, required: bool = True) -> str:
+        """Lee una variable del .env. Ahi viven los secretos, nunca en el JSON:
+        services_setup.conf se commitea, el .env esta en .gitignore."""
+        value = self._env.get(name, "")
+        if not value and required:
+            ui.die(
+                f"Falta {name} en {self.env_file}. "
+                f"Mirá env.example para saber que va ahi."
+            )
+        return value
+
     def get(self, *keys: str, default=None, required: bool = True):
         """conf.get('sabnzbd', 'port') -> valor de .sabnzbd.port"""
         node = self._data

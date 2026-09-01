@@ -24,11 +24,6 @@
 #  Secretos/IP     -> .env  (TAILSCALE_IP la escribe setup-host.sh)
 #  LOG             -> ./configure-stack.log  (cada request/response)
 #
-#  LO QUE NO HACE (queda manual, son credenciales personales):
-#    - Cargar indexers en Prowlarr: cada uno tiene campos propios.
-#    - Cargar el proveedor de Usenet en SABnzbd (Config -> Servers). Sin eso
-#      SABnzbd no baja nada: el indexer dice DONDE esta, el proveedor es DE
-#      DONDE se baja, y son dos suscripciones distintas.
 #
 #  >>> Requiere: docker, python3. Corre con sudo (toca /srv/config y docker).
 # =========================================================================
@@ -177,6 +172,19 @@ def main() -> int:
     prowlarr.apply_external_auth(SYS_SCRIPTS)
     prowlarr.wait_ready()
     prowlarr.add_flaresolverr()
+
+    # Los indexers salen del conf: agregar otro es editar services_setup.conf,
+    # no tocar codigo. La API key de cada uno vive en el .env (el conf se
+    # commitea, el .env no).
+    for indexer in cfg.get("prowlarr", "indexers", default=[], required=False):
+        prowlarr.add_indexer(
+            indexer["name"],
+            indexer["url"],
+            cfg.env(indexer["apiKeyEnv"]),
+        )
+
+    # Las apps van DESPUES de los indexers: al conectarlas con syncLevel
+    # fullSync, Prowlarr les empuja de una lo que ya tiene cargado.
     prowlarr.connect_app(radarr)
     prowlarr.connect_app(sonarr)
 
@@ -190,11 +198,13 @@ def main() -> int:
     ui.detail("  7878 Radarr    8989 Sonarr    9696 Prowlarr")
     ui.detail(f"  8080 qBittorrent    {sabnzbd.port} SABnzbd    6767 Bazarr    5055 Jellyseerr")
     print()
-    ui.warn("Faltan dos pasos manuales (son credenciales personales):")
-    ui.warn("  1) Indexers en Prowlarr (Indexers -> Add Indexer). A los que")
-    ui.warn(f"     esten detras de Cloudflare, poneles el tag '{prowlarr.FLARESOLVERR_TAG}'.")
-    ui.warn("  2) Proveedor de Usenet en SABnzbd (Config -> Servers). SIN ESTO")
-    ui.warn("     SABnzbd no baja nada, por mas que Radarr le mande trabajo.")
+    ui.warn("Falta un paso manual: el proveedor de Usenet en SABnzbd")
+    ui.warn(f"  ({sabnzbd.ui_url} -> Config -> Servers).")
+    ui.warn("  SIN ESTO SABnzbd no baja nada. El indexer (nzb.life) dice DONDE")
+    ui.warn("  esta el contenido; el proveedor es DE DONDE se baja.")
+    ui.warn("")
+    ui.warn("Si agregas indexers con Cloudflare, poneles el tag "
+            f"'{prowlarr.FLARESOLVERR_TAG}' en Prowlarr.")
     ui.logfile("=== configure-stack finalizado OK ===")
     return 0
 

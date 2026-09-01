@@ -26,6 +26,7 @@ RESET = "\033[0m"
 _log_path: Path | None = None
 _total_steps = 0
 _current_step = 0
+_secrets: set[str] = set()
 
 
 class StackError(Exception):
@@ -41,12 +42,30 @@ def init_log(path: Path, total_steps: int) -> None:
     logfile("=== configure-stack iniciado ===")
 
 
+def add_secret(value: str) -> None:
+    """Registra un valor para que NUNCA aparezca en claro en el log.
+
+    Las API keys viajan en el payload que mandamos Y en la respuesta que el
+    servicio devuelve (los *arr te repiten la config que acabas de guardar).
+    Enmascarar solo la request dejaria la key igual en el log, en el response.
+    Por eso el filtro esta en logfile() y no en el punto de uso.
+    """
+    if value and len(value) >= 8:      # los valores cortos darian falsos positivos
+        _secrets.add(value)
+
+
+def _mask(msg: str) -> str:
+    for secret in _secrets:
+        msg = msg.replace(secret, "<SECRETO>")
+    return msg
+
+
 def logfile(msg: str) -> None:
     if _log_path is None:
         return
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _log_path.open("a") as fh:
-        fh.write(f"[{stamp}] {msg}\n")
+        fh.write(f"[{stamp}] {_mask(msg)}\n")
 
 
 def step(title: str) -> None:

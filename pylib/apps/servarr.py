@@ -15,6 +15,7 @@ Lo que NO comparten, y por eso son atributos de clase:
     del otro da un 400 de validacion.
 """
 
+import copy
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -293,6 +294,99 @@ class Prowlarr(Servarr):
             f"Para usarlo: poné el tag '{self.FLARESOLVERR_TAG}' en los "
             "indexers con Cloudflare."
         )
+
+    # --- Indexers ---------------------------------------------------------
+    def _indexer_definition(self, wanted: str) -> dict:
+        """Busca la definicion del indexer en el catalogo de Prowlarr.
+
+        Se pide el schema en vez de armar el payload a mano porque cada
+        definicion trae su propia lista de 'fields' con los defaults que el
+        servidor espera (apiPath, categorias, etc). Adivinarlos es como
+        terminamos con el bug de movieCategory/tvCategory.
+
+        Si el indexer no tiene definicion propia en el catalogo, cae a
+        'Generic Newznab', que es lo que sirve para cualquier indexer de
+        usenet que hable el protocolo estandar.
+        """
+        resp = self.call("GET", "/indexer/schema")
+        if not resp.ok:
+            ui.die(f"No pude leer el catalogo de indexers (HTTP {resp.status}).")
+
+        definitions = resp.json() or []
+        norm = lambda s: "".join(c for c in (s or "").lower() if c.isalnum())
+        target = norm(wanted)
+
+        for item in definitions:
+            if norm(item.get("name")) == target:
+                ui.info(f"Encontre la definicion propia de '{item.get('name')}' en Prowlarr.")
+                return item
+
+        for item in definitions:
+            if norm(item.get("name")) == norm("Generic Newznab"):
+                ui.info(
+                    f"'{wanted}' no tiene definicion propia en Prowlarr; "
+                    "lo cargo como Generic Newznab."
+                )
+                return item
+
+        ui.die(
+            f"No encontre ni '{wanted}' ni 'Generic Newznab' en el catalogo "
+            "de Prowlarr."
+        )
+
+    def add_indexer(self, name: str, base_url: str, api_key: str) -> None:
+        """Agrega un indexer de usenet. Idempotente por nombre."""
+        ui.add_secret(api_key)
+
+        resp = self.call("GET", "/indexer")
+        if not resp.ok:
+            ui.die(f"No pude listar indexers de Prowlarr (HTTP {resp.status}).")
+        for item in resp.json() or []:
+            if item.get("name") == name:
+                ui.warn(
+                    f"El indexer '{name}' ya existe (id {item.get('id')}). "
+                    "No se duplica."
+                )
+                return
+
+        payload = copy.deepcopy(self._indexer_definition(name))
+        payload["name"] = name
+        payload["enable"] = True
+
+        # Sobre la definicion base solo pisamos lo nuestro: el resto de los
+        # campos quedan con los defaults que mando el propio Prowlarr.
+        overrides = {"baseUrl": base_url, "apiKey": api_key}
+        present = set()
+        for field in payload.get("fields", []):
+            if field.get("name") in overrides:
+                field["value"] = overrides[field["name"]]
+                present.add(field["name"])
+        for missing in overrides.keys() - present:
+            payload.setdefault("fields", []).append(
+                {"name": missing, "value": overrides[missing]}
+            )
+
+        # appProfileId: el perfil de sync que Prowlarr aplica al empujar el
+        # indexer a Radarr/Sonarr. Se pide en vez de asumir el id 1.
+        profiles = self.call("GET", "/appprofile")
+        if profiles.ok and profiles.json():
+            payload["appProfileId"] = profiles.json()[0]["id"]
+
+        ui.info(f"Probando la conexion a {name} (endpoint /test)...")
+        test = self.call("POST", "/indexer/test", payload)
+        if not test.ok:
+            ui.warn(f"El test de {name} fallo (HTTP {test.status}):")
+            print(test.errors())
+            ui.warn("Revisá la API key en .env y la URL en services_setup.conf.")
+            ui.die("Abortando: no guardo un indexer que no conecta.")
+        ui.info(f"Test OK: Prowlarr busca en {name}.")
+
+        saved = self.call("POST", "/indexer", payload)
+        if not saved.ok:
+            ui.warn(f"Fallo al agregar {name} (HTTP {saved.status}):")
+            print(saved.errors())
+            ui.die(f"No se pudo agregar el indexer {name}.")
+        ui.info(f"Indexer '{name}' agregado (id {(saved.json() or {}).get('id', '?')})")
 
     def connect_app(self, app: Servarr) -> None:
         """Registra una app para que Prowlarr le empuje los indexers.
