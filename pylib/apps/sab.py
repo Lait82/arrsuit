@@ -15,7 +15,6 @@ Sin eso SABnzbd no baja nada, por mas que Radarr le mande trabajo.
 """
 
 import re
-import time
 from pathlib import Path
 from typing import Any
 
@@ -94,13 +93,14 @@ class Sabnzbd:
         ui.detail(f"Completos    : {self.complete_dir}")
         ui.detail(f"Incompletos  : {self.incomplete_dir}")
 
-        ui.info("Esperando a que SABnzbd responda...")
-        for _ in range(attempts):
-            if self.call("version").ok:
-                ui.info("SABnzbd OK")
-                return
-            time.sleep(delay)
-        ui.die(f"SABnzbd no respondio despues de {attempts * delay}s.")
+        ok = ui.wait_for(
+            "Esperando a que SABnzbd responda",
+            lambda: self.call("version").ok,
+            attempts,
+            delay,
+        )
+        if not ok:
+            ui.die(f"SABnzbd no respondio despues de {attempts * delay}s.")
 
     def set_config(self, section: str, keyword: str, **values: Any) -> None:
         resp = self.call("set_config", section=section, keyword=keyword, **values)

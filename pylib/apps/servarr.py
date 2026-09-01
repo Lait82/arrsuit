@@ -15,7 +15,6 @@ Lo que NO comparten, y por eso son atributos de clase:
     del otro da un 400 de validacion.
 """
 
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -63,17 +62,18 @@ class Servarr:
 
     # --- HTTP ------------------------------------------------------------
     def call(self, method: str, path: str, data: Any = None) -> api.Response:
-        url = f"{self.url}/api/{self.api_version}{path.lstrip('/')}"
+        url = f"{self.url}/api/{self.api_version}{path}"
         return api.request(method, url, headers={"X-Api-Key": self.api_key}, data=data)
 
     def wait_ready(self, attempts: int = 30, delay: int = 2) -> None:
-        ui.info(f"Esperando a que {self.name} responda...")
-        for _ in range(attempts):
-            if self.call("GET", "/system/status").ok:
-                ui.info(f"{self.name} OK")
-                return
-            time.sleep(delay)
-        ui.die(f"{self.name} no respondio despues de {attempts * delay}s.")
+        ok = ui.wait_for(
+            f"Esperando a que {self.name} responda",
+            lambda: self.call("GET", "/system/status").ok,
+            attempts,
+            delay,
+        )
+        if not ok:
+            ui.die(f"{self.name} no respondio despues de {attempts * delay}s.")
 
     # --- Auth ------------------------------------------------------------
     def apply_external_auth(self, scripts_dir: Path) -> None:

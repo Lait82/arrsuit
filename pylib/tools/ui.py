@@ -1,16 +1,19 @@
 """Salida por consola y log a archivo.
 
 Jerarquia visual (la misma que tenia el bash):
-    step()  ==> verde, con linea en blanco arriba -> PASOS GRANDES
-    info()  ->  cyan, indentado                   -> pasos intermedios
-    warn()  [!] amarillo                          -> algo que hay que mirar
-    die()   [x] rojo, a stderr                    -> fatal
+    step()    ==> verde, con linea en blanco arriba -> PASOS GRANDES
+    info()    ->  cyan, indentado                   -> pasos intermedios
+    spinner() ⠋   cyan animado -> ✓/✗               -> esperas largas
+    warn()    [!] amarillo                          -> algo que hay que mirar
+    die()     [x] rojo, a stderr                    -> fatal
 
 El log a archivo guarda cada request/response completo. La consola muestra el
 resumen; cuando algo falla, el detalle esta en el archivo.
 """
 
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +68,81 @@ def warn(msg: str) -> None:
 def detail(msg: str) -> None:
     """Linea de datos alineada, sin simbolo (para los resumenes)."""
     print(f"     {msg}")
+
+
+# =========================================================================
+#  Spinner para las esperas largas
+#
+#  Mismo look que el spin() de setup-host.sh: frames braille en cyan, y al
+#  terminar la linea se reemplaza por ✓ verde o ✗ rojo.
+#
+#  Si no hay TTY (salida a archivo, CI, o corriendo por cron) NO anima: imprime
+#  el mensaje una vez y listo. Animar sin terminal llena el log de basura con
+#  cada \r y cada frame.
+# =========================================================================
+_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_HIDE_CURSOR = "\033[?25l"
+_SHOW_CURSOR = "\033[?25h"
+
+
+class Spinner:
+    def __init__(self, msg: str):
+        self.msg = msg
+        self.ok = True
+        self._tty = sys.stdout.isatty()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "Spinner":
+        logfile(f"esperando: {self.msg}")
+        if not self._tty:
+            print(f"  {self.msg}...")
+            return self
+        sys.stdout.write(_HIDE_CURSOR)
+        sys.stdout.flush()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def _spin(self) -> None:
+        i = 0
+        while not self._stop.is_set():
+            frame = _FRAMES[i % len(_FRAMES)]
+            sys.stdout.write(f"\r  {CYAN}{frame}{RESET} {self.msg}")
+            sys.stdout.flush()
+            i += 1
+            self._stop.wait(0.1)
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None:
+            self.ok = False
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join()
+            # \033[K borra hasta el fin de linea: si el mensaje final es mas
+            # corto que el que estaba animandose, si no quedan restos.
+            mark = f"{GREEN}✓{RESET}" if self.ok else f"{RED}✗{RESET}"
+            sys.stdout.write(f"\r  {mark} {self.msg}\033[K\n")
+            sys.stdout.write(_SHOW_CURSOR)
+            sys.stdout.flush()
+        elif not self.ok:
+            print(f"  {self.msg}: fallo")
+        return False   # nunca tragamos la excepcion
+
+
+def wait_for(msg: str, check, attempts: int = 30, delay: int = 2) -> bool:
+    """Llama a check() hasta que devuelva True, con el spinner al lado.
+
+    check() no deberia imprimir nada: la linea del spinner se reescribe con \\r
+    y cualquier print de por medio la parte al medio.
+    """
+    with Spinner(msg) as spin:
+        for _ in range(attempts):
+            if check():
+                return True
+            time.sleep(delay)
+        spin.ok = False
+    return False
 
 
 def die(msg: str) -> None:
