@@ -124,7 +124,8 @@ class Sabnzbd:
         current = ""
         if resp.ok:
             data = resp.json() or {}
-            current = (data.get("config", {}).get("misc", {}).get("host_whitelist")[0] or "")
+            hosts_whitelist_or_empty = (data.get("config", {}).get("misc", {}).get("host_whitelist") or [""])
+            current = (hosts_whitelist_or_empty[0] or "")
 
         entries = [e for e in current.split(",") if e]
         if SAB_INTERNAL_HOST in entries:
@@ -166,7 +167,8 @@ class Sabnzbd:
             )
             return
 
-        host = (server.get("host") or "").strip()
+        host_cfg = (server.get("host") or "").strip()
+        host = self.cfg.env(host_cfg)
         if not host or host.startswith("USENET"):
             ui.warn(
                 f"El host del proveedor sigue sin completar en {self.cfg.conf_file} "
