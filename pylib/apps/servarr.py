@@ -20,10 +20,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from tools import api
-from tools import ui
+from pylib.tools import api
+from pylib.tools import ui
 
-from tools import config
+from pylib.tools import config
 
 
 class Servarr:
@@ -84,7 +84,7 @@ class Servarr:
         que NO entra, asi que con DisabledForLocalAddresses te pide login igual.
         External delega la auth en la capa de acceso, que es el tailnet.
         """
-        from tools import sh
+        from pylib.tools import sh
 
         sh.run_script(
             scripts_dir / "servarr-auth.sh",

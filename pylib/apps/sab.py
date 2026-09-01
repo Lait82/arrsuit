@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from tools import api
-from tools import ui
+from pylib.tools import api
+from pylib.tools import ui
 
-from tools import config
+from pylib.tools import config
 
 SAB_NAME = "SABnzbd"
 SAB_CONTAINER = "sabnzbd"
