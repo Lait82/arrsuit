@@ -124,7 +124,7 @@ class Sabnzbd:
         current = ""
         if resp.ok:
             data = resp.json() or {}
-            current = (data.get("config", {}).get("misc", {}).get("host_whitelist") or "")
+            current = (data.get("config", {}).get("misc", {}).get("host_whitelist")[0] or "")
 
         entries = [e for e in current.split(",") if e]
         if SAB_INTERNAL_HOST in entries:
