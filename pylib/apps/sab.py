@@ -229,21 +229,25 @@ class Sabnzbd:
         ui.detail(f"Proveedor : {host}:{port} ({'SSL' if use_ssl else 'sin SSL'})")
         ui.detail(f"Conexiones: {connections}")
 
-        # test_server valida credenciales contra el proveedor real antes de
-        # guardar. Mismo criterio que con los download clients: no dejamos
-        # configurado algo que no conecta, porque despues falla en silencio.
-        ui.info(f"Probando el proveedor {host}...")
-        test = self.call("test_server", **params)
-        if not test.ok:
-            ui.warn(f"El proveedor rechazo la conexion: {self.error_of(test)}")
-            ui.warn("Revisá host, puerto, usuario y contrasenia.")
-            ui.warn("Si el puerto es 119 en vez de 563, poné \"ssl\": false en el conf.")
-            ui.die("Abortando: no guardo un proveedor que no conecta.")
-        ui.info("Test OK: el proveedor acepta la conexion.")
-
+        # Guardar y releer
         ui.info(f"Guardando el proveedor '{name}'...")
         self.set_config("servers", name, **params)
-        ui.info(f"Proveedor '{name}' cargado. SABnzbd ya puede descargar.")
+
+        check = self.call("get_config", section="servers")
+        saved = [
+            srv for srv in (check.json() or {}).get("config", {}).get("servers", [])
+            if srv.get("host") == host
+        ]
+        if not saved:
+            ui.warn("Guarde el proveedor pero SABnzbd no lo devuelve al releer.")
+            ui.die("No pude confirmar que el proveedor quedara cargado.")
+
+        ui.info(f"Proveedor '{name}' cargado ({host}:{port}).")
+        ui.warn(
+            "Las credenciales NO se validaron: la API de SABnzbd no permite "
+            "probarlas. Confirmá en la UI que el servidor este en verde:"
+        )
+        ui.warn(f"  {self.ui_url}/config/server/")
 
     def client_payload(self, category_field: str, category: str) -> dict:
         """host/port son los INTERNOS (sabnzbd:8080): quien hace la request es

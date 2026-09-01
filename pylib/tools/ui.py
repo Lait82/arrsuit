@@ -14,6 +14,7 @@ resumen; cuando algo falla, el detalle esta en el archivo.
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -49,9 +50,21 @@ def add_secret(value: str) -> None:
     servicio devuelve (los *arr te repiten la config que acabas de guardar).
     Enmascarar solo la request dejaria la key igual en el log, en el response.
     Por eso el filtro esta en logfile() y no en el punto de uso.
+
+    SE REGISTRAN TAMBIEN LAS FORMAS ESCAPADAS. Cuando el valor viaja como query
+    param, urlencode lo escapa antes de que lo veamos: una password como
+    'X7@K^!Px7G&*' llega al log como 'X7%40K%5E%21Px7G%26%2A'. El reemplazo es
+    literal, asi que sin las variantes escapadas la password queda en claro.
+    Paso realmente: una password con simbolos se filtro al log por esto.
     """
-    if value and len(value) >= 8:      # los valores cortos darian falsos positivos
-        _secrets.add(value)
+    if not value or len(value) < 8:    # los valores cortos darian falsos positivos
+        return
+    for variant in (
+        value,
+        urllib.parse.quote_plus(value),   # el que usa urlencode
+        urllib.parse.quote(value, safe=""),
+    ):
+        _secrets.add(variant)
 
 
 def _mask(msg: str) -> str:
