@@ -37,10 +37,13 @@ import os
 import sys
 from pathlib import Path
 
+from pylib.apps import sab, servarr
+from pylib.tools import sh, ui
+
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from pylib import config, sab, servarr, sh, ui  # noqa: E402
+from pylib.tools import config  # noqa: E402
 
 SYS_SCRIPTS = REPO_ROOT / "scripts" / "sys"
 TOTAL_STEPS = 8

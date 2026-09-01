@@ -20,7 +20,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from . import api, config, ui
+from tools import api
+from tools import ui
+
+from tools import config
 
 
 class Servarr:
@@ -60,13 +63,13 @@ class Servarr:
 
     # --- HTTP ------------------------------------------------------------
     def call(self, method: str, path: str, data: Any = None) -> api.Response:
-        url = f"{self.url}/api/{self.api_version}/{path.lstrip('/')}"
+        url = f"{self.url}/api/{self.api_version}{path.lstrip('/')}"
         return api.request(method, url, headers={"X-Api-Key": self.api_key}, data=data)
 
     def wait_ready(self, attempts: int = 30, delay: int = 2) -> None:
         ui.info(f"Esperando a que {self.name} responda...")
         for _ in range(attempts):
-            if self.call("GET", "system/status").ok:
+            if self.call("GET", "/system/status").ok:
                 ui.info(f"{self.name} OK")
                 return
             time.sleep(delay)
@@ -81,7 +84,7 @@ class Servarr:
         que NO entra, asi que con DisabledForLocalAddresses te pide login igual.
         External delega la auth en la capa de acceso, que es el tailnet.
         """
-        from . import sh
+        from tools import sh
 
         sh.run_script(
             scripts_dir / "servarr-auth.sh",
@@ -94,7 +97,7 @@ class Servarr:
 
     # --- Download clients -------------------------------------------------
     def find_download_client(self, client_name: str) -> int | None:
-        resp = self.call("GET", "downloadclient")
+        resp = self.call("GET", "/downloadclient")
         if not resp.ok:
             ui.die(
                 f"No pude listar download clients de {self.name} "
@@ -120,14 +123,14 @@ class Servarr:
             return
 
         ui.info(f"Probando {self.name} -> {client_name} (endpoint /test)...")
-        test = self.call("POST", "downloadclient/test", payload)
+        test = self.call("POST", "/downloadclient/test", payload)
         if not test.ok:
             ui.warn(f"El test fallo (HTTP {test.status}):")
             print(test.errors())
             ui.die(f"Abortando: no guardo un download client que no conecta.")
         ui.info(f"Test OK: {self.name} alcanza a {client_name}.")
 
-        saved = self.call("POST", "downloadclient", payload)
+        saved = self.call("POST", "/downloadclient", payload)
         if not saved.ok:
             ui.warn(f"Fallo al agregar (HTTP {saved.status}):")
             print(saved.errors())
@@ -137,7 +140,7 @@ class Servarr:
 
     # --- Root folders -----------------------------------------------------
     def add_root_folder(self, ctr_path: str) -> None:
-        resp = self.call("GET", "rootfolder")
+        resp = self.call("GET", "/rootfolder")
         if not resp.ok:
             ui.die(f"No pude listar root folders de {self.name} (HTTP {resp.status}).")
         for item in resp.json() or []:
@@ -149,7 +152,7 @@ class Servarr:
                 return
 
         ui.info(f"Agregando el root folder a {self.name}...")
-        saved = self.call("POST", "rootfolder", {"path": ctr_path})
+        saved = self.call("POST", "/rootfolder", {"path": ctr_path})
         if not saved.ok:
             ui.warn(f"Fallo al agregar el root folder (HTTP {saved.status}):")
             print(saved.errors())
@@ -227,14 +230,14 @@ class Prowlarr(Servarr):
         Prowlarr aplica el proxy SOLO a los indexers que llevan el tag: es el
         mecanismo de "este indexer si pasa por FlareSolverr, este no".
         """
-        resp = self.call("GET", "tag")
+        resp = self.call("GET", "/tag")
         if not resp.ok:
             ui.die(f"No pude listar tags de Prowlarr (HTTP {resp.status}).")
         for item in resp.json() or []:
             if item.get("label") == label:
                 return item["id"]
 
-        created = self.call("POST", "tag", {"label": label})
+        created = self.call("POST", "/tag", {"label": label})
         if not created.ok:
             ui.die(f"No pude crear el tag '{label}' (HTTP {created.status}).")
         return (created.json() or {})["id"]
@@ -246,7 +249,7 @@ class Prowlarr(Servarr):
         el tag a un indexer. Es a proposito: mandar todos los indexers por
         FlareSolverr es mas lento y no hace falta.
         """
-        resp = self.call("GET", "indexerproxy")
+        resp = self.call("GET", "/indexerproxy")
         if not resp.ok:
             ui.die(f"No pude listar indexer proxies (HTTP {resp.status}).")
         for item in resp.json() or []:
@@ -273,14 +276,14 @@ class Prowlarr(Servarr):
         }
 
         ui.info("Probando la conexion a FlareSolverr (endpoint /test)...")
-        test = self.call("POST", "indexerproxy/test", payload)
+        test = self.call("POST", "/indexerproxy/test", payload)
         if not test.ok:
             ui.warn(f"El test de FlareSolverr fallo (HTTP {test.status}):")
             print(test.errors())
             ui.die("Abortando: no guardo un proxy que no conecta.")
         ui.info("Test OK: Prowlarr alcanza a FlareSolverr.")
 
-        saved = self.call("POST", "indexerproxy", payload)
+        saved = self.call("POST", "/indexerproxy", payload)
         if not saved.ok:
             ui.warn(f"Fallo al agregar el proxy (HTTP {saved.status}):")
             print(saved.errors())
@@ -300,7 +303,7 @@ class Prowlarr(Servarr):
         syncLevel fullSync: Prowlarr agrega, actualiza Y borra indexers en la
         app. Es lo que hace que no toques los indexers en Radarr/Sonarr nunca mas.
         """
-        resp = self.call("GET", "applications")
+        resp = self.call("GET", "/applications")
         if not resp.ok:
             ui.die(f"No pude listar applications de Prowlarr (HTTP {resp.status}).")
         for item in resp.json() or []:
@@ -326,14 +329,14 @@ class Prowlarr(Servarr):
         }
 
         ui.info(f"Probando la conexion Prowlarr -> {app.name} (endpoint /test)...")
-        test = self.call("POST", "applications/test", payload)
+        test = self.call("POST", "/applications/test", payload)
         if not test.ok:
             ui.warn(f"El test contra {app.name} fallo (HTTP {test.status}):")
             print(test.errors())
             ui.die("Abortando: no guardo una app que no conecta.")
         ui.info(f"Test OK: Prowlarr alcanza a {app.name}.")
 
-        saved = self.call("POST", "applications", payload)
+        saved = self.call("POST", "/applications", payload)
         if not saved.ok:
             ui.warn(f"Fallo al conectar {app.name} (HTTP {saved.status}):")
             print(saved.errors())
