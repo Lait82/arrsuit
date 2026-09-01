@@ -147,6 +147,102 @@ class Sabnzbd:
             ui.info(f"Creando categoria '{cat}' en SABnzbd...")
             self.set_config("categories", cat, name=cat, dir=cat)
 
+    # =====================================================================
+    #  Proveedor de Usenet (news server)
+    #
+    #  ES LA PIEZA SIN LA CUAL NADA BAJA. El indexer (nzb.life) dice DONDE
+    #  esta el contenido; el proveedor es DE DONDE se descarga. Son dos
+    #  suscripciones distintas y SABnzbd necesita las dos.
+    #
+    #  El host y el puerto van en el conf (no son secretos); el usuario y la
+    #  contrasenia van en el .env, que esta en .gitignore.
+    # =====================================================================
+    def configure_server(self) -> None:
+        server = self.cfg.get("sabnzbd", "server", default=None, required=False)
+        if not server:
+            ui.warn(
+                "No hay .sabnzbd.server en el conf: SABnzbd queda sin proveedor "
+                "y no va a poder descargar nada."
+            )
+            return
+
+        host = (server.get("host") or "").strip()
+        if not host or host.startswith("USENET"):
+            ui.warn(
+                f"El host del proveedor sigue sin completar en {self.cfg.conf_file} "
+                "(.sabnzbd.server.host). SABnzbd no va a poder descargar."
+            )
+            return
+
+        use_ssl = server.get("ssl", True)
+        if use_ssl:
+            port =(server.get("sslPort") or "")
+            if not port:
+                ui.warn(
+                    f"Ssl esta activado y el port ssl del proveedor de usenet en {self.cfg.conf_file} esta vacio"
+                    " SABnzbd no va a poder descargar."
+                )
+                return
+        else:
+            port =(server.get("noSslPort") or "")
+            if not port:
+                ui.warn(
+                    f"El port del proveedor de usenet en {self.cfg.conf_file} esta vacio"
+                    " SABnzbd no va a poder descargar."
+                )
+                return
+
+        name = host
+        connections = server.get("connections", 8)
+        username = self.cfg.env(server["usernameEnv"])
+        password = self.cfg.env(server["passwordEnv"])
+
+        # La password viaja como query param: registrarla ANTES de la primera
+        # llamada, si no queda en claro en configure-stack.log.
+        ui.add_secret(password)
+        ui.add_secret(username)
+
+        params = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connections": connections,
+            "ssl": 1 if use_ssl else 0,
+        }
+
+        # Idempotencia: SABnzbd indexa los servidores por nombre, pero lo que
+        # importa es que no haya dos apuntando al mismo host.
+        existing = self.call("get_config", section="servers")
+        if existing.ok:
+            servers = (existing.json() or {}).get("config", {}).get("servers", [])
+            for srv in servers:
+                if srv.get("host") == host:
+                    ui.warn(
+                        f"El proveedor '{srv.get('name', host)}' ya esta cargado. "
+                        "No se duplica."
+                    )
+                    return
+
+        ui.detail(f"Proveedor : {host}:{port} ({'SSL' if use_ssl else 'sin SSL'})")
+        ui.detail(f"Conexiones: {connections}")
+
+        # test_server valida credenciales contra el proveedor real antes de
+        # guardar. Mismo criterio que con los download clients: no dejamos
+        # configurado algo que no conecta, porque despues falla en silencio.
+        ui.info(f"Probando el proveedor {host}...")
+        test = self.call("test_server", **params)
+        if not test.ok:
+            ui.warn(f"El proveedor rechazo la conexion: {self.error_of(test)}")
+            ui.warn("Revisá host, puerto, usuario y contrasenia.")
+            ui.warn("Si el puerto es 119 en vez de 563, poné \"ssl\": false en el conf.")
+            ui.die("Abortando: no guardo un proveedor que no conecta.")
+        ui.info("Test OK: el proveedor acepta la conexion.")
+
+        ui.info(f"Guardando el proveedor '{name}'...")
+        self.set_config("servers", name, **params)
+        ui.info(f"Proveedor '{name}' cargado. SABnzbd ya puede descargar.")
+
     def client_payload(self, category_field: str, category: str) -> dict:
         """host/port son los INTERNOS (sabnzbd:8080): quien hace la request es
         el contenedor de Radarr/Sonarr por la red 'media', no vos por Tailscale."""

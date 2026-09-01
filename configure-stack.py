@@ -158,6 +158,9 @@ def main() -> int:
         )
     sabnzbd.configure_dirs()
     sabnzbd.configure_categories([radarr_category, sonarr_category])
+    # El proveedor es lo unico sin lo cual SABnzbd no descarga nada, aunque
+    # todo lo demas quede perfecto.
+    sabnzbd.configure_server()
     radarr.upsert_download_client(
         sab.SAB_NAME, sabnzbd.client_payload(radarr.category_field, radarr_category)
     )
@@ -194,15 +197,13 @@ def main() -> int:
     ui.detail(f"Series    : {sonarr_root}")
     ui.detail("Descargas : torrent via qBittorrent + usenet via SABnzbd")
     print()
+    # Los puertos salen de los objetos y no de strings sueltos: si cambia el
+    # de una clase, este resumen no queda mintiendo.
     ui.detail(f"Paneles (por Tailscale, http://{cfg.tailscale_ip}:PUERTO):")
-    ui.detail("  7878 Radarr    8989 Sonarr    9696 Prowlarr")
-    ui.detail(f"  8080 qBittorrent    {sabnzbd.port} SABnzbd    6767 Bazarr    5055 Jellyseerr")
+    ui.detail(f"  {radarr.port} Radarr    {sonarr.port} Sonarr    {prowlarr.port} Prowlarr")
+    ui.detail(f"  {config.TC_PORT} qBittorrent    {sabnzbd.port} SABnzbd")
+    ui.detail("  6767 Bazarr    5055 Jellyseerr    8265 Tdarr")
     print()
-    ui.warn("Falta un paso manual: el proveedor de Usenet en SABnzbd")
-    ui.warn(f"  ({sabnzbd.ui_url} -> Config -> Servers).")
-    ui.warn("  SIN ESTO SABnzbd no baja nada. El indexer (nzb.life) dice DONDE")
-    ui.warn("  esta el contenido; el proveedor es DE DONDE se baja.")
-    ui.warn("")
     ui.warn("Si agregas indexers con Cloudflare, poneles el tag "
             f"'{prowlarr.FLARESOLVERR_TAG}' en Prowlarr.")
     ui.logfile("=== configure-stack finalizado OK ===")
