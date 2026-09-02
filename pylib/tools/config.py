@@ -44,8 +44,17 @@ QBIT_CONF = "/srv/config/qbittorrent/qBittorrent/qBittorrent.conf"
 #  eso tienen que estar tambien loopback y los RFC1918.
 #
 #  No son configuracion: son las constantes de las RFC que definen cada rango.
-DEFAULT_LOCAL_RANGES="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-LOCAL_RANGES = ",".join((DEFAULT_LOCAL_RANGES, "100.64.0.0/10"))
+LOCAL_RANGES=",".join([
+    # Default local ranges
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+
+    # Tailnet range
+    "100.64.0.0/10"
+])
 
 
 def ctr_to_host_path(ctr_path: str) -> str:
