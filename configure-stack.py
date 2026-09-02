@@ -149,7 +149,11 @@ def main() -> int:
     ui.step("Configurando SABnzbd (usenet)")
     # Va DESPUES de Radarr y Sonarr porque se conecta a los dos.
     sabnzbd.wait_ready()
+    # Los dos filtros de acceso de SABnzbd, que son independientes:
+    #   host_whitelist -> header Host  -> lo necesita Radarr (usa 'sabnzbd')
+    #   local_ranges   -> IP de origen -> lo necesita tu NAVEGADOR (Tailscale)
     sabnzbd.ensure_host_whitelist()
+    sabnzbd.configure_local_ranges()
     for ctr_path in (sabnzbd.complete_dir, sabnzbd.incomplete_dir):
         sh.run_script(
             SYS_SCRIPTS / "ensure-dir.sh",

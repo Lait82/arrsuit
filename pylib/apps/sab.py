@@ -136,6 +136,40 @@ class Sabnzbd:
         ui.info(f"Agregando '{SAB_INTERNAL_HOST}' al host_whitelist...")
         self.set_config("misc", "host_whitelist", value=",".join(entries))
 
+    def configure_local_ranges(self) -> None:
+        """Abre el acceso a la UI desde el tailnet.
+
+        SEGUNDO FILTRO, DISTINTO de host_whitelist: local_ranges mira la IP de
+        ORIGEN, host_whitelist mira el header Host.
+
+        El script no lo necesita (entra por loopback, que siempre es local),
+        pero SI el navegador: cuando abris la UI desde tu maquina, la request
+        sale de tu IP de Tailscale (100.x.x.x, CGNAT) y SABnzbd la clasifica
+        como internet externo -> "External internet access denied".
+
+        Ojo: en SABnzbd esta lista REEMPLAZA el default de RFC1918, no lo
+        extiende. Por eso config.LOCAL_RANGES trae tambien los rangos privados.
+        """
+        resp = self.call("get_config", section="misc", keyword="local_ranges")
+        current = ""
+        if resp.ok:
+            data = resp.json() or {}
+            value = data.get("config", {}).get("misc", {}).get("local_ranges")
+            if isinstance(value, list):
+                current = ",".join(str(v) for v in value)
+            elif value:
+                current = str(value)
+
+        wanted = {r.strip() for r in config.LOCAL_RANGES.split(",") if r.strip()}
+        have = {r.strip() for r in current.split(",") if r.strip()}
+        if wanted <= have:
+            ui.info("local_ranges ya cubre el rango de Tailscale. No se toca.")
+            return
+
+        ui.info("Habilitando el acceso a la UI desde el tailnet (local_ranges)...")
+        self.set_config("misc", "local_ranges", value=config.LOCAL_RANGES)
+        ui.detail(f"local_ranges = {config.LOCAL_RANGES}")
+
     def configure_dirs(self) -> None:
         ui.info("Configurando carpetas de descarga...")
         self.set_config("misc", "download_dir", value=self.incomplete_dir)
@@ -150,10 +184,6 @@ class Sabnzbd:
 
     # =====================================================================
     #  Proveedor de Usenet (news server)
-    #
-    #  ES LA PIEZA SIN LA CUAL NADA BAJA. El indexer (nzb.life) dice DONDE
-    #  esta el contenido; el proveedor es DE DONDE se descarga. Son dos
-    #  suscripciones distintas y SABnzbd necesita las dos.
     #
     #  El host y el puerto van en el conf (no son secretos); el usuario y la
     #  contrasenia van en el .env, que esta en .gitignore.
