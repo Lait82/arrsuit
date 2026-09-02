@@ -36,25 +36,6 @@ PGID = 1000
 QBIT_CONTAINER = "qbittorrent"
 QBIT_CONF = "/srv/config/qbittorrent/qBittorrent/qBittorrent.conf"
 
-# =========================================================================
-#  RANGOS "LOCALES"
-#
-#
-#  En SABnzbd esta lista REEMPLAZA el default, no lo extiende. Por
-#  eso tienen que estar tambien loopback y los RFC1918.
-#
-#  No son configuracion: son las constantes de las RFC que definen cada rango.
-LOCAL_RANGES=",".join([
-    # Default local ranges
-    "127.0.0.1",
-    "::1",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-
-    # Tailnet range
-    "100.64.0.0/10"
-])
 
 
 def ctr_to_host_path(ctr_path: str) -> str:

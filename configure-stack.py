@@ -151,9 +151,11 @@ def main() -> int:
     sabnzbd.wait_ready()
     # Los dos filtros de acceso de SABnzbd, que son independientes:
     #   host_whitelist -> header Host  -> lo necesita Radarr (usa 'sabnzbd')
-    #   local_ranges   -> IP de origen -> lo necesita tu NAVEGADOR (Tailscale)
+    #   inet_exposure  -> nivel de acceso para los que SABnzbd ve como
+    #                     "externos" -> lo necesita tu NAVEGADOR, que entra
+    #                     por la IP de Tailscale (CGNAT, no RFC1918)
     sabnzbd.ensure_host_whitelist()
-    sabnzbd.configure_local_ranges()
+    sabnzbd.configure_inet_exposure()
     for ctr_path in (sabnzbd.complete_dir, sabnzbd.incomplete_dir):
         sh.run_script(
             SYS_SCRIPTS / "ensure-dir.sh",

@@ -32,6 +32,10 @@ SAB_INI = Path("/srv/config/sabnzbd/sabnzbd.ini")
 SAB_INTERNAL_HOST = "sabnzbd"
 SAB_INTERNAL_PORT = 8080
 
+# Nivel de acceso para clientes que SABnzbd considera "externos". Ver el
+# docstring de configure_inet_exposure() para la tabla completa y el porque.
+INET_EXPOSURE_FULL_WEB = 4
+
 
 class Sabnzbd:
     def __init__(self, cfg: config.Config):
@@ -103,16 +107,49 @@ class Sabnzbd:
             ui.die(f"SABnzbd no respondio despues de {attempts * delay}s.")
 
     def set_config(self, section: str, keyword: str, **values: Any) -> None:
+        """Escribe una opcion y VERIFICA que haya quedado guardada.
+
+        SABnzbd tiene dos formas de fallar, no una:
+          1. {"status": false, "error": "..."}  -> la detecta call()
+          2. HTTP 200, sin error, y el valor descartado en silencio
+
+        La segunda paso de verdad con local_ranges: la request volvio 200 y la
+        respuesta traia {"local_ranges": []}, o sea lista vacia. El script
+        siguio contento y el acceso a la UI quedo bloqueado igual.
+
+        Por eso se compara lo que devuelve el echo contra lo que mandamos: si
+        no coincide, SABnzbd no acepto el valor aunque no lo diga.
+        """
         resp = self.call("set_config", section=section, keyword=keyword, **values)
         if not resp.ok:
             ui.warn(f"Fallo set_config {section}/{keyword}: {self.error_of(resp)}")
             ui.die("No pude configurar SABnzbd.")
 
-    def ensure_host_whitelist(self) -> None:
-        """host_whitelist es un chequeo DISTINTO de local_ranges.
+        if "value" not in values:
+            return   # las secciones con campos propios (servers) no hacen echo simple
 
-        local_ranges mira la IP de origen; host_whitelist mira el header Host.
-        Son dos filtros independientes:
+        echoed = (resp.json() or {}).get("config", {}).get(section, {})
+        if isinstance(echoed, dict):
+            stored = echoed.get(keyword)
+        else:
+            stored = None
+        if stored is None:
+            return   # no hay echo para comparar: no inventamos un error
+
+        sent = str(values["value"])
+        got = ",".join(str(v) for v in stored) if isinstance(stored, list) else str(stored)
+
+        if {p for p in got.split(",") if p} != {p for p in sent.split(",") if p}:
+            ui.warn(f"SABnzbd acepto la request pero NO guardo {section}/{keyword}.")
+            ui.warn(f"  mandado : {sent}")
+            ui.warn(f"  guardado: {got or '<vacio>'}")
+            ui.die(
+                f"No pude configurar {keyword}. Probá el valor a mano contra "
+                f"{self.url}/api?mode=set_config&section={section}&keyword={keyword}"
+            )
+
+    def ensure_host_whitelist(self) -> None:
+        """host_whitelist mira el header Host.
 
             script  -> http://127.0.0.1:8081   Host es una IP    -> no se verifica
             Radarr  -> http://sabnzbd:8080     Host es 'sabnzbd' -> SI se verifica
@@ -136,39 +173,23 @@ class Sabnzbd:
         ui.info(f"Agregando '{SAB_INTERNAL_HOST}' al host_whitelist...")
         self.set_config("misc", "host_whitelist", value=",".join(entries))
 
-    def configure_local_ranges(self) -> None:
-        """Abre el acceso a la UI desde el tailnet.
-
-        SEGUNDO FILTRO, DISTINTO de host_whitelist: local_ranges mira la IP de
-        ORIGEN, host_whitelist mira el header Host.
-
-        El script no lo necesita (entra por loopback, que siempre es local),
-        pero SI el navegador: cuando abris la UI desde tu maquina, la request
-        sale de tu IP de Tailscale (100.x.x.x, CGNAT) y SABnzbd la clasifica
-        como internet externo -> "External internet access denied".
-
-        Ojo: en SABnzbd esta lista REEMPLAZA el default de RFC1918, no lo
-        extiende. Por eso config.LOCAL_RANGES trae tambien los rangos privados.
-        """
-        resp = self.call("get_config", section="misc", keyword="local_ranges")
-        current = ""
+    def configure_inet_exposure(self) -> None:
+        """Abre la UI para quien llegue desde el tailnet."""
+        resp = self.call("get_config", section="misc", keyword="inet_exposure")
+        current = None
         if resp.ok:
             data = resp.json() or {}
-            value = data.get("config", {}).get("misc", {}).get("local_ranges")
-            if isinstance(value, list):
-                current = ",".join(str(v) for v in value)
-            elif value:
-                current = str(value)
+            current = data.get("config", {}).get("misc", {}).get("inet_exposure")
 
-        wanted = {r.strip() for r in config.LOCAL_RANGES.split(",") if r.strip()}
-        have = {r.strip() for r in current.split(",") if r.strip()}
-        if wanted <= have:
-            ui.info("local_ranges ya cubre el rango de Tailscale. No se toca.")
+        if str(current) == str(INET_EXPOSURE_FULL_WEB):
+            ui.info("inet_exposure ya permite la interfaz web. No se toca.")
             return
 
-        ui.info("Habilitando el acceso a la UI desde el tailnet (local_ranges)...")
-        self.set_config("misc", "local_ranges", value=config.LOCAL_RANGES)
-        ui.detail(f"local_ranges = {config.LOCAL_RANGES}")
+        ui.info(
+            f"Habilitando el acceso a la UI desde el tailnet "
+            f"(inet_exposure {current} -> {INET_EXPOSURE_FULL_WEB})..."
+        )
+        self.set_config("misc", "inet_exposure", value=INET_EXPOSURE_FULL_WEB)
 
     def configure_dirs(self) -> None:
         ui.info("Configurando carpetas de descarga...")
