@@ -32,8 +32,8 @@ SAB_INI = Path("/srv/config/sabnzbd/sabnzbd.ini")
 SAB_INTERNAL_HOST = "sabnzbd"
 SAB_INTERNAL_PORT = 8080
 
-# Nivel de acceso para clientes que SABnzbd considera "externos". Ver el
-# docstring de configure_inet_exposure() para la tabla completa y el porque.
+# Nivel de acceso para los clientes que SABnzbd considera externos.
+# 4 = API + interfaz web. La tabla completa esta en scripts/sys/sab-access.sh.
 INET_EXPOSURE_FULL_WEB = 4
 
 
@@ -107,18 +107,11 @@ class Sabnzbd:
             ui.die(f"SABnzbd no respondio despues de {attempts * delay}s.")
 
     def set_config(self, section: str, keyword: str, **values: Any) -> None:
-        """Escribe una opcion y VERIFICA que haya quedado guardada.
+        """Escribe una opcion y verifica que haya quedado guardada.
 
-        SABnzbd tiene dos formas de fallar, no una:
-          1. {"status": false, "error": "..."}  -> la detecta call()
-          2. HTTP 200, sin error, y el valor descartado en silencio
-
-        La segunda paso de verdad con local_ranges: la request volvio 200 y la
-        respuesta traia {"local_ranges": []}, o sea lista vacia. El script
-        siguio contento y el acceso a la UI quedo bloqueado igual.
-
-        Por eso se compara lo que devuelve el echo contra lo que mandamos: si
-        no coincide, SABnzbd no acepto el valor aunque no lo diga.
+        SABnzbd puede responder 200 sin error y descartar el valor igual (pasa
+        con las opciones protect=True). Por eso se compara el echo de la
+        respuesta contra lo que se mando.
         """
         resp = self.call("set_config", section=section, keyword=keyword, **values)
         if not resp.ok:
@@ -148,48 +141,24 @@ class Sabnzbd:
                 f"{self.url}/api?mode=set_config&section={section}&keyword={keyword}"
             )
 
-    def ensure_host_whitelist(self) -> None:
-        """host_whitelist mira el header Host.
+    def configure_access(self, scripts_dir: Path) -> None:
+        """host_whitelist e inet_exposure, via scripts/sys/sab-access.sh.
 
-            script  -> http://127.0.0.1:8081   Host es una IP    -> no se verifica
-            Radarr  -> http://sabnzbd:8080     Host es 'sabnzbd' -> SI se verifica
+        Va por archivo y no por API: inet_exposure esta declarada con
+        protect=True en sabnzbd/cfg.py, y config.py saltea el set de las
+        opciones protegidas sin devolver error.
 
-        Sin esto, Radarr y Sonarr reciben "Hostname verification failed" y el
-        download client no conecta nunca.
+        Reinicia el contenedor, asi que se llama ANTES de wait_ready().
         """
-        resp = self.call("get_config", section="misc", keyword="host_whitelist")
-        current = ""
-        if resp.ok:
-            data = resp.json() or {}
-            hosts_whitelist_or_empty = (data.get("config", {}).get("misc", {}).get("host_whitelist") or [""])
-            current = (hosts_whitelist_or_empty[0] or "")
+        from pylib.tools import sh
 
-        entries = [e for e in current.split(",") if e]
-        if SAB_INTERNAL_HOST in entries:
-            ui.info(f"host_whitelist ya incluye '{SAB_INTERNAL_HOST}'. No se toca.")
-            return
-
-        entries.append(SAB_INTERNAL_HOST)
-        ui.info(f"Agregando '{SAB_INTERNAL_HOST}' al host_whitelist...")
-        self.set_config("misc", "host_whitelist", value=",".join(entries))
-
-    def configure_inet_exposure(self) -> None:
-        """Abre la UI para quien llegue desde el tailnet."""
-        resp = self.call("get_config", section="misc", keyword="inet_exposure")
-        current = None
-        if resp.ok:
-            data = resp.json() or {}
-            current = data.get("config", {}).get("misc", {}).get("inet_exposure")
-
-        if str(current) == str(INET_EXPOSURE_FULL_WEB):
-            ui.info("inet_exposure ya permite la interfaz web. No se toca.")
-            return
-
-        ui.info(
-            f"Habilitando el acceso a la UI desde el tailnet "
-            f"(inet_exposure {current} -> {INET_EXPOSURE_FULL_WEB})..."
+        sh.run_script(
+            scripts_dir / "sab-access.sh",
+            SAB_CONTAINER,
+            str(SAB_INI),
+            SAB_INTERNAL_HOST,
+            INET_EXPOSURE_FULL_WEB,
         )
-        self.set_config("misc", "inet_exposure", value=INET_EXPOSURE_FULL_WEB)
 
     def configure_dirs(self) -> None:
         ui.info("Configurando carpetas de descarga...")

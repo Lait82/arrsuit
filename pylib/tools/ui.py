@@ -46,16 +46,13 @@ def init_log(path: Path, total_steps: int) -> None:
 def add_secret(value: str) -> None:
     """Registra un valor para que NUNCA aparezca en claro en el log.
 
-    Las API keys viajan en el payload que mandamos Y en la respuesta que el
-    servicio devuelve (los *arr te repiten la config que acabas de guardar).
-    Enmascarar solo la request dejaria la key igual en el log, en el response.
-    Por eso el filtro esta en logfile() y no en el punto de uso.
+    El filtro esta en logfile() y no en el punto de uso porque el secreto
+    aparece tanto en la request como en la respuesta: los *arr repiten la
+    config que acaban de guardar.
 
-    SE REGISTRAN TAMBIEN LAS FORMAS ESCAPADAS. Cuando el valor viaja como query
-    param, urlencode lo escapa antes de que lo veamos: una password como
-    'X7@K^!Px7G&*' llega al log como 'X7%40K%5E%21Px7G%26%2A'. El reemplazo es
-    literal, asi que sin las variantes escapadas la password queda en claro.
-    Paso realmente: una password con simbolos se filtro al log por esto.
+    Se registran tambien las formas escapadas: cuando el valor viaja como query
+    param, urlencode lo transforma ('X7@K^!' -> 'X7%40K%5E%21') y el reemplazo
+    literal no matchearia.
     """
     if not value or len(value) < 8:    # los valores cortos darian falsos positivos
         return

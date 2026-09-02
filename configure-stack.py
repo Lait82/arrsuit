@@ -148,14 +148,9 @@ def main() -> int:
     # -- 6 ----------------------------------------------------------------
     ui.step("Configurando SABnzbd (usenet)")
     # Va DESPUES de Radarr y Sonarr porque se conecta a los dos.
+    # Antes de wait_ready: reinicia el contenedor.
+    sabnzbd.configure_access(SYS_SCRIPTS)
     sabnzbd.wait_ready()
-    # Los dos filtros de acceso de SABnzbd, que son independientes:
-    #   host_whitelist -> header Host  -> lo necesita Radarr (usa 'sabnzbd')
-    #   inet_exposure  -> nivel de acceso para los que SABnzbd ve como
-    #                     "externos" -> lo necesita tu NAVEGADOR, que entra
-    #                     por la IP de Tailscale (CGNAT, no RFC1918)
-    sabnzbd.ensure_host_whitelist()
-    sabnzbd.configure_inet_exposure()
     for ctr_path in (sabnzbd.complete_dir, sabnzbd.incomplete_dir):
         sh.run_script(
             SYS_SCRIPTS / "ensure-dir.sh",

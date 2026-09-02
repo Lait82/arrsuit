@@ -4,13 +4,9 @@
 #
 #  Sincroniza el stack con el compose.
 #
-#  'up -d' SIEMPRE, no solo cuando el stack esta abajo. Es idempotente: crea lo
-#  que falta, recrea lo que cambio de config y no toca el resto.
-#
-#  Antes esto estaba detras de un "¿esta corriendo qbittorrent?" y se salteaba
-#  entero si el stack ya estaba arriba. Consecuencia: al agregar un servicio
-#  nuevo al compose (SABnzbd fue el caso), el contenedor NUNCA se creaba y los
-#  pasos siguientes fallaban buscando un archivo que no existia.
+#  'up -d' SIEMPRE, sin preguntar si el stack esta arriba: es idempotente y es
+#  lo unico que crea los servicios que se hayan agregado al compose desde la
+#  ultima corrida.
 # =========================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
