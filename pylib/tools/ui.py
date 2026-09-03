@@ -102,8 +102,8 @@ def detail(msg: str) -> None:
 # =========================================================================
 #  Spinner para las esperas largas
 #
-#  Mismo look que el spin() de setup-host.sh: frames braille en cyan, y al
-#  terminar la linea se reemplaza por ✓ verde o ✗ rojo.
+#  Frames braille en cyan y, al terminar, la linea se reemplaza por un
+#  ✓ verde o un ✗ rojo.
 #
 #  Si no hay TTY (salida a archivo, CI, o corriendo por cron) NO anima: imprime
 #  el mensaje una vez y listo. Animar sin terminal llena el log de basura con

@@ -17,7 +17,7 @@
 #    - SABnzbd: ${TAILSCALE_IP}:8081 (UI) + 127.0.0.1:8081 (API del script)
 #    - Torrent (6881): sale por gluetun/ProtonVPN, no por la IP del VPS
 #
-#  La variable ${TAILSCALE_IP} la escribe setup-host.sh en el .env.
+#  La variable ${TAILSCALE_IP} la escribe el paso 1 de configure-stack.py.
 #  Levanta el stack desde la carpeta que tiene el .env:
 #      docker compose up -d
 #  (o: docker compose --env-file /ruta/al/.env up -d)
@@ -194,7 +194,7 @@ services:
   # publica en 8081 para no chocar con el bind de gluetun. Se publica en DOS
   # IPs del host (Docker lo permite: mismo puerto, distinta interfaz):
   #   - ${TAILSCALE_IP} -> para entrar vos con el navegador
-  #   - 127.0.0.1       -> para que configure-stack.sh le pegue a la API.
+  #   - 127.0.0.1       -> para que configure-stack.py le pegue a la API.
   #     Va por loopback y no por Tailscale porque SABnzbd responde 403
   #     ("External internet access denied") a todo lo que no venga de loopback
   #     o RFC1918, y la IP de Tailscale es CGNAT (100.64.0.0/10), que no entra.

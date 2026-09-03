@@ -37,9 +37,18 @@ class Servarr:
     def __init__(self, cfg: config.Config):
         self.cfg = cfg
         self.config_xml = Path(f"/srv/config/{self.container}/config.xml")
-        self.url = f"http://{cfg.tailscale_ip}:{self.port}"
         self.internal_url = f"http://{self.container}:{self.port}"
         self._api_key: str | None = None
+
+    @property
+    def url(self) -> str:
+        """URL por el tailnet. Se arma al usarse, no en __init__.
+
+        La IP de Tailscale la descubre el paso 1 del orquestador, que corre
+        DESPUES de construir estos objetos. Fijarla en el constructor la
+        congelaba vacia en la primera corrida.
+        """
+        return f"http://{self.cfg.tailscale_ip}:{self.port}"
 
     # --- API key ---------------------------------------------------------
     @property

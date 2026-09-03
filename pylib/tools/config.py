@@ -3,7 +3,7 @@
 Separacion que se mantiene del bash:
   - CONSTANTES  -> las define el compose, no son configurables (puertos,
                    nombres de contenedor, subnet). Viven aca como codigo.
-  - .env        -> secretos y la IP de Tailscale (la escribe setup-host.sh)
+  - .env        -> secretos y la IP de Tailscale (la escribe el paso 1)
   - conf (JSON) -> lo que el usuario elige (categorias, carpetas)
 """
 
@@ -86,7 +86,7 @@ class Config:
         if not self.conf_file.is_file():
             ui.die(f"No existe {self.conf_file}")
         if not self.env_file.is_file():
-            ui.die(f"No existe {self.env_file} (lo escribe setup-host.sh)")
+            ui.die(f"No existe {self.env_file}. Copiá la plantilla: cp env.example .env")
 
         try:
             self._data = json.loads(self.conf_file.read_text())
@@ -95,9 +95,39 @@ class Config:
 
         self._env = self._read_env(self.env_file)
 
-        self.tailscale_ip = self._env.get("TAILSCALE_IP", "")
-        if not self.tailscale_ip:
-            ui.die("TAILSCALE_IP vacio en .env. ¿Corriste setup-host.sh?")
+    def reload_env(self) -> None:
+        """Vuelve a leer el .env.
+
+        Hace falta porque el paso 1 del orquestador ESCRIBE en el .env: es el
+        que descubre la IP de Tailscale. Sin esto, el resto de la corrida
+        seguiria viendo el .env como estaba al arrancar.
+        """
+        self._env = self._read_env(self.env_file)
+
+    @property
+    def tailscale_ip(self) -> str:
+        """IP del tailnet. La escribe el paso 1 (scripts/sys/tailscale-up.sh).
+
+        Es una property y no un atributo fijado en __init__ a proposito: quien
+        la produce corre DESPUES de que se construye este objeto. Leerla en el
+        constructor devolvia siempre el valor viejo (o vacio, en la primera
+        corrida) y las URLs de los servicios quedaban armadas mal.
+        """
+        ip = self._env.get("TAILSCALE_IP", "")
+        if not ip:
+            ui.die(
+                "TAILSCALE_IP vacio en .env. La escribe el paso "
+                "'Preparando el host'; si llegaste hasta aca sin ella, ese paso fallo."
+            )
+        return ip
+
+    @property
+    def ssh_port(self) -> str:
+        """Puerto SSH a abrir en el firewall. Default 22.
+
+        Si no coincide con el real, el 'ufw enable' te deja afuera del server.
+        """
+        return self._env.get("SSH_PORT", "") or "22"
 
     @staticmethod
     def _read_env(path: Path) -> dict[str, str]:

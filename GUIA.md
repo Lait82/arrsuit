@@ -4,40 +4,38 @@ Todo asume que ya tenés Docker + Docker Compose en la VPS.
 Los paneles NO se exponen a internet: se acceden por la IP de tu tailnet.
 
 **Casi todo vive en el compose**, incluidos el reverse proxy (nginx), el
-geo-bloqueo y fail2ban. En el host quedan solo dos cosas, porque no pueden estar
-adentro de un contenedor: **Tailscale** (crea una interfaz de red del host) y
-**UFW** (son las reglas del host). De esas se ocupa `setup-host.sh`.
+geo-bloqueo y fail2ban. Del host solo quedan afuera de Docker dos cosas, porque
+no pueden estar adentro: **Tailscale** (crea una interfaz de red del host) y
+**UFW** (son las reglas del host). Pero ya no se configuran aparte: son el
+**paso 1** del orquestador.
 
-El orden es siempre el mismo:
+Son dos comandos, y el segundo hace todo:
 
 ```bash
 cp env.example .env && nano .env   # secretos
-sudo ./setup-host.sh               # Tailscale + UFW  (escribe TAILSCALE_IP en el .env)
-sudo ./configure-stack.py          # levanta el compose y configura todo
+sudo ./configure-stack.py          # host + compose + configuración de servicios
 ```
 
-`setup-host.sh` frena la primera vez para que autentiques Tailscale en el
-navegador (`sudo tailscale up --ssh`) y te pide que lo vuelvas a correr. Los dos
-son idempotentes: se pueden correr las veces que haga falta.
+Es idempotente de punta a punta: se puede correr las veces que haga falta. Cada
+paso chequea antes de actuar, así que una segunda pasada no reinstala paquetes
+ni reconstruye el firewall.
 
-> **Si venís de la versión vieja** (nginx y fail2ban instalados con `apt` en el
-> host): `setup-host.sh` los apaga solo con `systemctl disable --now`. Hace falta
-> porque el nginx del host tiene tomado el puerto 80 y el contenedor no podría
-> bindearlo. No los desinstala: si algo sale mal, `systemctl enable --now nginx`
-> te devuelve lo que tenías.
+> **La primera vez frena en el paso 1** si Tailscale todavía no está
+> autenticado: eso abre una URL en el navegador y no se automatiza. Corré
+> `sudo tailscale up --ssh`, autenticá, y volvé a correr el mismo comando.
+
+> ⚠️ Antes de la primera corrida, revisá que `SSH_PORT` en el `.env` sea tu
+> puerto SSH real. El paso 1 configura UFW y abre **solo** ese puerto; si no
+> coincide, te quedás afuera del server.
 
 ---
 
 ## Paso 0 — Estructura de carpetas
 
-Creá las carpetas de datos antes de levantar nada:
-
-```bash
-sudo mkdir -p /srv/config
-sudo mkdir -p /srv/media/{downloads,movies,series}
-# que tu usuario (PUID/PGID 1000) sea dueño:
-sudo chown -R 1000:1000 /srv
-```
+**Esto lo hace solo el orquestador** (paso 2, `media-tree.sh`): crea las carpetas
+con el dueño correcto y verifica desde adentro de cada contenedor que pueda
+escribir. Queda documentado acá para que entiendas el layout, no para que lo
+corras a mano.
 
 Estructura resultante:
 
@@ -73,7 +71,7 @@ Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`series/` con
 5. Generá y abrí el archivo `.conf`. Copiá el valor de `PrivateKey`.
 6. En la carpeta del compose:
    ```bash
-   cp .env.example .env
+   cp env.example .env
    nano .env   # pegá la private key en WIREGUARD_PRIVATE_KEY
    ```
 
@@ -82,6 +80,9 @@ Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`series/` con
 ---
 
 ## Paso 2 — Levantar el stack
+
+**Esto también lo hace el orquestador** (paso 4). Lo de abajo sirve para
+levantarlo a mano si estás debuggeando:
 
 ```bash
 cd /ruta/al/media-stack
@@ -196,8 +197,8 @@ Lo único que sale a internet es el **puerto 80**, donde escucha nginx y proxea
 Jellyfin. El `8096` de la tabla es un atajo para vos por el tailnet (entrás al
 dashboard sin pasar por el geo-bloqueo); desde internet ese puerto no existe.
 
-**Firewall:** lo configura `setup-host.sh` (UFW: solo SSH, Tailscale y el 80).
-Pero el que realmente tapa los paneles **no es UFW**: son los binds a
+**Firewall:** lo configura el paso 1 del orquestador (UFW: solo SSH, Tailscale
+y el 80). Pero el que realmente tapa los paneles **no es UFW**: son los binds a
 `${TAILSCALE_IP}` del compose. Docker publica los puertos escribiendo sus
 propias reglas de DNAT, que se evalúan **antes** que las cadenas de UFW, así que
 un servicio publicado en `0.0.0.0` quedaría expuesto aunque UFW diga `deny`.

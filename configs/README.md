@@ -7,13 +7,17 @@ lo que los contenedores montan.
 
 Quién hace qué:
 
-| Pieza | Dónde corre | Quién la configura |
-|-------|-------------|--------------------|
-| nginx, fail2ban, geoipupdate, Jellyfin | contenedores (`compose.yml`) | `configure-stack.py` |
-| Tailscale, UFW | host | `setup-host.sh` |
+| Pieza | Dónde corre | Paso del orquestador |
+|-------|-------------|----------------------|
+| Tailscale, UFW | host | 1 — `pylib/apps/host.py` |
+| nginx, fail2ban, geoipupdate | contenedores | 3 — `pylib/apps/proxy.py` |
+| Jellyfin y el resto del stack | contenedores | 4 en adelante |
 
-Tailscale y UFW quedan afuera porque no pueden estar adentro: uno crea una
-interfaz de red del host y el otro son las reglas del host.
+Todo lo configura **`configure-stack.py`**, un solo comando. Tailscale y UFW
+quedan afuera de Docker porque no pueden estar adentro (uno crea una interfaz de
+red del host, el otro son las reglas del host), pero igual están orquestados
+como el primer paso: es ahí donde se descubre la IP del tailnet que el compose
+necesita para bindear los paneles.
 
 ## Modelo de amenaza
 

@@ -5,11 +5,11 @@ archivos. Lo unico que hay que DECIDIR es si el geo-bloqueo se activa, y eso
 depende de si el .env trae credenciales de MaxMind. El resto es copiar los
 archivos de configs/ a /srv/config, que es lo que los contenedores montan.
 
-Los dos corren en el compose (antes iban instalados en el host via
-setup-host.sh). Consecuencia importante que se ve en jail.d/jellyfin.local:
-con nginx en un contenedor, el trafico de internet ya no pasa por la cadena
-INPUT del firewall sino por el forward de Docker, asi que fail2ban tiene que
-banear en DOCKER-USER.
+Los dos corren en el compose; antes se instalaban con apt en el host.
+Consecuencia importante que se ve en jail.d/jellyfin.local: con nginx en un
+contenedor, el trafico de internet ya no pasa por la cadena INPUT del firewall
+sino por el forward de Docker, asi que fail2ban tiene que banear en
+DOCKER-USER.
 """
 
 import filecmp

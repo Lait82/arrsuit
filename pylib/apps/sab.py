@@ -56,8 +56,16 @@ class Sabnzbd:
         # request salga de la misma maquina.
         # El compose publica el puerto en las dos IPs justamente para esto.
         self.url = f"http://127.0.0.1:{self.port}"
-        self.ui_url = f"http://{cfg.tailscale_ip}:{self.port}"
         self._api_key: str | None = None
+
+    @property
+    def ui_url(self) -> str:
+        """URL por el tailnet (la que abris vos en el navegador).
+
+        Property y no atributo: la IP de Tailscale la descubre el paso 1 del
+        orquestador, despues de que este objeto se construye.
+        """
+        return f"http://{self.cfg.tailscale_ip}:{self.port}"
 
     @property
     def api_key(self) -> str:
