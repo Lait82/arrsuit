@@ -1,15 +1,27 @@
-# Media stack — capa de host
+# Media stack — la capa que da a internet
 
-Este directorio configura **lo que corre en el host** (fuera de Docker) para el
-media stack: el reverse proxy que expone Jellyfin a internet, el geo-bloqueo, el
-baneo de IPs y el firewall. El `docker-compose.yml` (los contenedores) va aparte.
+Este directorio tiene la config de **nginx** (reverse proxy + geo-bloqueo +
+rate limit) y de **fail2ban** (baneo de IPs). Los dos corren **en el compose**,
+no instalados en el host: los archivos de acá se copian a `/srv/config`, que es
+lo que los contenedores montan.
+
+Quién hace qué:
+
+| Pieza | Dónde corre | Quién la configura |
+|-------|-------------|--------------------|
+| nginx, fail2ban, geoipupdate, Jellyfin | contenedores (`compose.yml`) | `configure-stack.py` |
+| Tailscale, UFW | host | `setup-host.sh` |
+
+Tailscale y UFW quedan afuera porque no pueden estar adentro: uno crea una
+interfaz de red del host y el otro son las reglas del host.
 
 ## Modelo de amenaza
 
 La decisión de diseño detrás de todo esto:
 
 - **Jellyfin** es el **único** servicio expuesto a internet, porque la tele
-  (Samsung Tizen) no puede entrar por Tailscale.
+  (Samsung Tizen) no puede entrar por Tailscale. Y sale siempre **a través de
+  nginx**: su propio puerto solo escucha en la IP de Tailscale.
 - **Todo lo demás** (Prowlarr, Radarr, Sonarr, Bazarr, Jellyseerr, Tdarr,
   qBittorrent) queda **solo accesible por Tailscale**. Son los paneles que, si se
   filtran, comprometen el server; no tienen por qué salir a internet.
@@ -20,13 +32,15 @@ La decisión de diseño detrás de todo esto:
   Jellyfin actualizado (`docker compose pull`).
 - **No hay TLS** (no hay dominio, es IP pelada). Consecuencia asumida: las
   credenciales viajan sin cifrar. Si algún día querés TLS, alcanza con apuntar un
-  subdominio a la IP y correr `certbot --nginx`.
+  subdominio a la IP y usar la variante SWAG de la imagen de nginx, que trae
+  certbot.
 
 ## Las tres capas de defensa
 
-1. **Geo-bloqueo (nginx + GeoIP2):** solo pasan las IPs de Argentina. Saca de
-   encima el grueso del escaneo automatizado, que viene de datacenters en otros
-   países. Un 403 antes de que la request llegue a Jellyfin.
+1. **Geo-bloqueo (nginx + GeoIP2):** solo pasan las IPs de los países de
+   `.nginx.geoBlock.countries` (`services_setup.conf`). Saca de encima el grueso
+   del escaneo automatizado, que viene de datacenters en otros países. Un 403
+   antes de que la request llegue a Jellyfin.
 2. **Rate limit del login (nginx):** limita los intentos contra el endpoint de
    autenticación (10/min por IP). Solo el login — el streaming machaca otros
    endpoints y no debe limitarse.
@@ -34,133 +48,100 @@ La decisión de diseño detrás de todo esto:
    IPs que fallan el login repetidamente (4 fallos en 1h → ban de 24h). Es un
    rate-limiter inteligente: banea por *fallo de auth*, no por volumen.
 
-Y por debajo de todo, **UFW** cierra el host: solo entra SSH, la interfaz de
-Tailscale y el puerto 80 (Jellyfin vía nginx).
+Y por debajo de todo, **UFW** cierra el host: solo entra SSH y la interfaz de
+Tailscale.
 
 ## Archivos
 
 ```
-host-setup/
-├── setup-host.sh              # script idempotente que instala y configura todo
-├── .env.example              # plantilla de variables (copiar a .env)
-├── .env                      # tus valores reales (NO versionado, lo creás vos)
-├── .gitignore                # excluye el .env del repo
+configs/
+├── services_setup.conf        # config editable del stack (incl. países del geo)
 ├── nginx/
-│   ├── jellyfin               # server block: reverse proxy + geo + rate limit
+│   ├── site-confs/
+│   │   └── default.conf       # server block: reverse proxy + geo + rate limit
 │   ├── proxy_jellyfin.conf    # headers de proxy compartidos (incl. WebSockets)
-│   └── geoip2-snippet.conf    # bloque geoip2+map (se inserta en nginx.conf)
-├── fail2ban/
-│   ├── jellyfin.conf          # filtro (regex de login fallido)
-│   └── jellyfin.local         # jail (umbrales de baneo)
-└── README.md
+│   ├── geoip-on.conf.tmpl     # bloque geoip2 + map  (geo ACTIVADO)
+│   └── geoip-off.conf         # map que deja pasar todo (geo DESACTIVADO)
+└── fail2ban/
+    ├── filter.d/jellyfin.conf # filtro (regex de login fallido)
+    └── jail.d/jellyfin.local  # jail (umbrales de baneo + cadena de iptables)
 ```
 
-## Uso
+`configure-stack.py` los copia a `/srv/config` en cada corrida y, si cambiaron,
+recarga nginx y reinicia fail2ban. Editar acá y volver a correr el script es el
+flujo normal; no hay que tocar `/srv/config` a mano.
 
-### 1. Prerequisitos
+## Los dos detalles que hay que entender
 
-- Cuenta gratis en [MaxMind](https://www.maxmind.com/en/geolite2/signup) para la
-  base GeoLite2 (necesitás Account ID + License Key). Sin esto, el script se
-  configura **sin** geo-bloqueo y avisa.
-- El `docker-compose.yml` con los binds. Ojo: dejá el placeholder `100.x.y.z` y
-  reemplazalo por la IP de Tailscale **después** de correr el script por primera
-  vez (el script te la muestra). O corré el script, anotá la IP que detecta, y
-  recién ahí hacés el find-replace en el compose y levantás los contenedores.
+### 1. fail2ban banea en `DOCKER-USER`, no en `INPUT`
 
-**Tailscale ya NO es prerequisito manual**: el script lo instala. Lo único que no
-puede hacer solo es la autenticación (necesitás abrir una URL en el navegador),
-así que la primera corrida va a frenar pidiéndote que corras `sudo tailscale up`
-y reintentes. La IP de Tailscale se deriva sola con `tailscale ip -4`; ya no la
-ponés a mano en ningún lado del script.
+Con nginx corriendo en un contenedor, el tráfico de internet **no termina en el
+host**: Docker lo hace DNAT y lo reenvía al contenedor, así que atraviesa
+`FORWARD` y nunca toca `INPUT`. Un ban en `INPUT` (el default de fail2ban) se
+aplicaría a una cadena por la que el atacante no pasa: no banea nada.
 
-### 2. Configurar el `.env`
+`DOCKER-USER` es la cadena que Docker deja libre justo en ese camino. Está
+seteada en `fail2ban/jail.d/jellyfin.local`. **Si alguna vez movés nginx de
+vuelta al host, hay que volver a `INPUT`.**
 
-Las variables y credenciales se leen de un archivo `.env` (no van hardcodeadas en
-el script). Copiá la plantilla y completala:
+Por lo mismo el `banaction` es `iptables-allports` y no `iptables-multiport`: en
+`DOCKER-USER` el paquete ya viene con el puerto traducido al del contenedor, así
+que filtrar por `http` sería frágil.
 
-```bash
-cp .env.example .env
-nano .env
-```
+### 2. Sin `known proxy` en Jellyfin, fail2ban es inútil
 
-Contenido:
+Jellyfin loguea la IP de quien le pega, que ahora es el contenedor de nginx. Hay
+que decirle que confíe en el `X-Forwarded-For`:
 
-```bash
-MAXMIND_ACCOUNT_ID=...      # de tu cuenta MaxMind (vacío = sin geo-bloqueo)
-MAXMIND_LICENSE_KEY=...     # de tu cuenta MaxMind (vacío = sin geo-bloqueo)
-SSH_PORT=22                 # cambialo si usás otro
-```
+> Jellyfin → Dashboard → Networking → **Known proxies**: `172.20.0.0/16`
 
-El `.env` real **no se versiona** (está en `.gitignore`); solo se commitea
-`.env.example`. Así no subís secretos a git. La IP de Tailscale no va en el `.env`:
-el script la deriva sola con `tailscale ip -4`.
+Sin eso, fail2ban ve siempre la IP de nginx y termina baneando al proxy.
 
-Si dejás las credenciales de MaxMind vacías, el script corre igual pero configura
-nginx **sin** geo-bloqueo (y te avisa).
+## Cómo se decide si el geo-bloqueo se activa
 
-### 3. Correr
+`configure-stack.py` mira el `.env`:
 
-```bash
-cd host-setup
-sudo ./setup-host.sh
-```
+- **Con** `MAXMIND_ACCOUNT_ID` + `MAXMIND_LICENSE_KEY` → renderiza
+  `geoip-on.conf.tmpl` con los países del `services_setup.conf`, baja la base
+  GeoLite2 al volumen `geoip` y levanta el contenedor `geoipupdate` (perfil
+  `geo` del compose) para mantenerla al día una vez por semana.
+- **Sin** credenciales → copia `geoip-off.conf`, que define `$allowed_country`
+  fijo en `yes`. El stack levanta igual, sin geo, y avisa.
 
-El script es **idempotente**: podés correrlo de nuevo sin duplicar reglas ni
-romper nada. Qué hace, en orden:
+Son dos archivos y no un `sed` sobre uno solo porque el server block usa
+`$allowed_country` siempre, y nginx **no arranca** con una variable que nadie
+define: aún con el geo apagado hace falta un `map` que la fije.
 
-1. Instala nginx, geoipupdate, fail2ban, ufw.
-2. **Instala Tailscale y lo levanta.** Si todavía no autenticaste, **frena acá**
-   y te pide correr `sudo tailscale up` (o `--ssh`) y reintentar — la auth es
-   interactiva y no se puede automatizar sin auth key. Una vez autenticado,
-   deriva la IP de Tailscale sola.
-3. Baja la base de MaxMind y arma un cron semanal para mantenerla al día.
-4. Coloca las configs de nginx, inserta el bloque geoip2 en `nginx.conf`, valida
-   con `nginx -t` y recién ahí recarga. **Si `nginx -t` falla, no recarga.**
-5. Instala el filtro y jail de fail2ban, y valida el regex contra los logs reales
-   si ya existen.
-6. Configura UFW **abriendo SSH y Tailscale ANTES** de activarlo (para no
-   lockearte). Antes de tocar el firewall verifica que `tailscale0` exista; si no,
-   aborta para no dejarte afuera.
-7. Imprime un checklist de verificaciones manuales.
-
-Como la primera corrida frena en el paso 2 para que autentiques, en la práctica lo
-corrés **dos veces**: la primera instala Tailscale y para; autenticás; la segunda
-completa todo de una.
-
-### 4. Orden recomendado la primera vez
-
-Para no debuggear diez cosas a la vez, conviene ir por partes:
-
-1. Levantá el `docker compose up -d` primero (con los binds ya puestos).
-2. Corré el script **sin** license key de MaxMind → nginx queda sin geo. Probá
-   que la tele entra y reproduce por `http://<IP-VPS>/`.
-3. Agregá la license key y volvé a correr el script → activa el geo-bloqueo.
-   Confirmá que seguís entrando desde Argentina.
-4. Probá el baneo: 4 logins fallidos a propósito y `sudo fail2ban-client status
-   jellyfin`.
+Cuenta gratis para las credenciales:
+[MaxMind GeoLite2](https://www.maxmind.com/en/geolite2/signup).
 
 ## Verificaciones post-instalación
 
 - [ ] Desde **datos móviles** (fuera de tu red), `http://<IP-VPS>/` entra a
-      Jellyfin; los puertos de los *arr (9696, 7878, 8989…) **no** responden.
-- [ ] Si los *arr responden pese a UFW: es el problema conocido de **Docker
+      Jellyfin; los puertos de los *arr (9696, 7878, 8989…) y el 8096 de
+      Jellyfin **no** responden.
+- [ ] Si alguno responde pese a UFW: es el problema conocido de **Docker
       saltándose UFW**. Se resuelve con los binds explícitos a la IP de Tailscale
       en el compose (ya están puestos), que son inmunes a eso.
-- [ ] En Jellyfin → Dashboard → Networking → agregar `127.0.0.1` como known proxy,
-      para que loguee la IP real del cliente (si no, fail2ban banea a `127.0.0.1`).
+- [ ] Known proxies en Jellyfin (ver arriba).
 - [ ] Validar el regex de fail2ban contra tus logs:
-      `sudo fail2ban-regex /srv/config/jellyfin/log/<archivo>.log /etc/fail2ban/filter.d/jellyfin.conf`
+      ```bash
+      docker exec fail2ban fail2ban-regex \
+          /remotelogs/jellyfin/<archivo>.log \
+          /config/fail2ban/filter.d/jellyfin.conf
+      ```
       El formato del mensaje de login fallido cambia entre versiones de Jellyfin;
       si no matchea, ajustá el `failregex`.
+- [ ] Probar el baneo: 4 logins fallidos a propósito y
+      `docker exec fail2ban fail2ban-client status jellyfin`.
 
 ## Notas
 
 - **El regex de fail2ban es lo más frágil.** Depende de la versión de Jellyfin.
   Es lo primero a revisar si los baneos no ocurren.
-- **Sin known proxy en Jellyfin, fail2ban es inútil:** verá siempre la IP de
-  nginx (`127.0.0.1`) en vez de la del atacante.
+- **La imagen de nginx es la de LinuxServer y no la oficial** porque trae
+  compilado `ngx_http_geoip2`, que la oficial no tiene. Sin ese módulo no hay
+  geo-bloqueo posible.
 - **Actualizar Jellyfin** con cierta frecuencia (`docker compose pull &&
   docker compose up -d`) es lo único que te cubre de CVEs conocidos, que a
   diferencia de un 0-day sí son evitables.
-- Si algún día agregás un dominio, corré `sudo certbot --nginx -d tudominio` y
-  tenés TLS sin tocar el resto.

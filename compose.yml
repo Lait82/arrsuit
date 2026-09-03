@@ -2,12 +2,15 @@
 #  Media stack para VPS (CPU-only) - Manu
 #  Gluetun (ProtonVPN/WireGuard) -> qBittorrent   |   SABnzbd (usenet, directo)
 #  Prowlarr, Radarr, Sonarr, Bazarr, Jellyseerr, Tdarr, Recyclarr, FlareSolverr
-#  Jellyfin -> unico servicio expuesto (via nginx en :80, geo-bloqueo AR)
+#  nginx -> unico servicio expuesto a internet (:80), proxea Jellyfin
+#  fail2ban + geoipupdate -> capa de defensa del borde
 #
 #  Datos en /srv (config) y media en /srv/media
 #
 #  BINDS DE SEGURIDAD:
-#    - Jellyfin: 127.0.0.1  -> solo lo alcanza nginx (que aplica geo + rate limit)
+#    - nginx: 0.0.0.0:80 -> lo unico abierto a internet (geo + rate limit)
+#    - Jellyfin: sin puerto publico; nginx le llega por la red 'media'.
+#      El bind a ${TAILSCALE_IP} es solo para entrar al dashboard por tailnet.
 #    - arr y paneles: ${TAILSCALE_IP} (IP Tailscale) -> solo vos, por el tailnet
 #    - qBittorrent WebUI: ${TAILSCALE_IP}:8080, publicado por gluetun porque
 #      qbit comparte su stack de red (network_mode: service:gluetun)
@@ -18,20 +21,26 @@
 #  Levanta el stack desde la carpeta que tiene el .env:
 #      docker compose up -d
 #  (o: docker compose --env-file /ruta/al/.env up -d)
+#
+#  El perfil 'geo' (geoipupdate) solo se activa si hay credenciales de MaxMind;
+#  configure-stack.py lo decide y se lo pasa al compose.
 # =========================================================================
 
 services:
 
   # -----------------------------------------------------------------------
-  # Jellyfin - media server. UNICO expuesto, detras de nginx en el host.
-  # Bindeado a localhost: solo nginx le llega.
+  # Jellyfin - media server. Lo unico que se ve desde internet, pero SIEMPRE
+  # a traves de nginx: aca no publica el 8096 al mundo.
+  #
+  # El bind a ${TAILSCALE_IP} es comodidad para vos (dashboard sin pasar por
+  # el geo-bloqueo); desde internet ese puerto no existe.
   # -----------------------------------------------------------------------
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
     networks: [media]
     ports:
-      - "127.0.0.1:8096:8096"   # solo nginx (reverse proxy en el host)
+      - "${TAILSCALE_IP}:8096:8096"   # solo Tailscale (nginx entra por la red interna)
     environment:
       - PUID=1000
       - PGID=1000
@@ -39,6 +48,86 @@ services:
     volumes:
       - /srv/config/jellyfin:/config
       - /srv/media:/data
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # nginx - reverse proxy y UNICO servicio abierto a internet.
+  #
+  # Imagen de LinuxServer y no la oficial: trae compilado el modulo
+  # ngx_http_geoip2, que la oficial no tiene y sin el no hay geo-bloqueo.
+  #
+  # Llega a Jellyfin por la red 'media' (http://jellyfin:8096), asi que
+  # Jellyfin ya no necesita publicar el puerto en el host.
+  #
+  # /geoip es de solo lectura: lo llena geoipupdate, nginx solo lo lee.
+  # -----------------------------------------------------------------------
+  nginx:
+    image: lscr.io/linuxserver/nginx:latest
+    container_name: nginx
+    networks: [media]
+    ports:
+      - "80:80"                 # internet
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /srv/config/nginx:/config
+      - geoip:/geoip:ro
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # geoipupdate - mantiene al dia la base GeoLite2 que usa el geo-bloqueo.
+  #
+  # Vive detras del perfil 'geo': sin credenciales de MaxMind la imagen sale
+  # con error, asi que en vez de dejarla reiniciandose para siempre no se
+  # levanta. configure-stack.py activa el perfil solo si el .env tiene las
+  # credenciales, y en ese caso tambien renderiza el bloque geoip2 de nginx.
+  #
+  # GEOIPUPDATE_FREQUENCY esta en HORAS: 168 = una vez por semana.
+  # -----------------------------------------------------------------------
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate:latest
+    container_name: geoipupdate
+    profiles: ["geo"]
+    networks: [media]
+    environment:
+      - GEOIPUPDATE_ACCOUNT_ID=${MAXMIND_ACCOUNT_ID}
+      - GEOIPUPDATE_LICENSE_KEY=${MAXMIND_LICENSE_KEY}
+      - GEOIPUPDATE_EDITION_IDS=GeoLite2-Country
+      - GEOIPUPDATE_FREQUENCY=168
+    volumes:
+      - geoip:/usr/share/GeoIP
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # fail2ban - banea a nivel de firewall del host las IPs que fallan el login
+  # de Jellyfin. Lee los logs por bind read-only, no por red.
+  #
+  # network_mode host + NET_ADMIN/NET_RAW: las reglas de baneo son del HOST,
+  # no del contenedor. Sin la red del host, banearia su propio namespace y no
+  # serviria de nada.
+  #
+  # OJO con la cadena de iptables (esta en jail.d/jellyfin.local): ahora que
+  # nginx es un contenedor, el trafico entrante NO pasa por INPUT sino por el
+  # camino de forward de Docker. Por eso el jail usa DOCKER-USER.
+  # -----------------------------------------------------------------------
+  fail2ban:
+    image: lscr.io/linuxserver/fail2ban:latest
+    container_name: fail2ban
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /srv/config/fail2ban:/config
+      # /remotelogs es la convencion de la imagen: una subcarpeta por app.
+      - /srv/config/jellyfin/log:/remotelogs/jellyfin:ro
+      - /srv/config/nginx/log/nginx:/remotelogs/nginx:ro
     restart: unless-stopped
 
   # -----------------------------------------------------------------------
@@ -281,3 +370,9 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+
+volumes:
+  # Base GeoLite2: la escribe geoipupdate, la lee nginx. Volumen y no bind
+  # porque es un cache descartable, no config que quieras respaldar.
+  geoip:
+    name: geoip

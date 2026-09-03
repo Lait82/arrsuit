@@ -36,6 +36,18 @@ PGID = 1000
 QBIT_CONTAINER = "qbittorrent"
 QBIT_CONF = "/srv/config/qbittorrent/qBittorrent/qBittorrent.conf"
 
+#  Rutas de config de nginx y fail2ban vistas DESDE EL HOST.
+#  El 'nginx/nginx' y el 'fail2ban/fail2ban' repetidos no son un typo: el
+#  compose monta /srv/config/nginx como /config, y adentro de esa imagen el
+#  arbol de config cuelga de /config/nginx/. Lo mismo con fail2ban.
+NGINX_CONTAINER = "nginx"
+NGINX_SITE_CONFS_DIR = "/srv/config/nginx/nginx/site-confs"
+NGINX_CONF_DIR = "/srv/config/nginx/nginx"
+
+F2B_CONTAINER = "fail2ban"
+F2B_FILTER_DIR = "/srv/config/fail2ban/fail2ban/filter.d"
+F2B_JAIL_DIR = "/srv/config/fail2ban/fail2ban/jail.d"
+
 
 
 def ctr_to_host_path(ctr_path: str) -> str:

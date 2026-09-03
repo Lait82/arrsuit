@@ -32,7 +32,7 @@ import os
 import sys
 from pathlib import Path
 
-from pylib.apps import sab, servarr
+from pylib.apps import proxy, sab, servarr
 from pylib.tools import sh, ui
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -41,7 +41,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from pylib.tools import config  # noqa: E402
 
 SYS_SCRIPTS = REPO_ROOT / "scripts" / "sys"
-TOTAL_STEPS = 8
+TOTAL_STEPS = 9
 
 
 def check_prereqs() -> None:
@@ -63,6 +63,7 @@ def main() -> int:
     sonarr = servarr.Sonarr(cfg)
     prowlarr = servarr.Prowlarr(cfg)
     sabnzbd = sab.Sabnzbd(cfg)
+    edge = proxy.Proxy(cfg, REPO_ROOT)
 
     radarr_category = cfg.get("radarr", "downloadClientCategory")
     sonarr_category = cfg.get("sonarr", "downloadClientCategory")
@@ -93,17 +94,30 @@ def main() -> int:
     )
 
     # -- 2 ----------------------------------------------------------------
-    ui.step("Levantando el stack")
-    sh.run_script(SYS_SCRIPTS / "compose-up.sh", REPO_ROOT)
+    ui.step("Preparando el borde (nginx + fail2ban)")
+    # VA ANTES del compose up: los contenedores montan /srv/config, asi que si
+    # la config no esta puesta cuando arrancan, nginx levanta con el sitio de
+    # ejemplo de la imagen en vez del reverse proxy de Jellyfin.
+    edge_changed = edge.install_configs(SYS_SCRIPTS)
+    if edge.geo_enabled:
+        edge.sync_geoip_db(SYS_SCRIPTS)
 
     # -- 3 ----------------------------------------------------------------
+    ui.step("Levantando el stack")
+    sh.run_script(SYS_SCRIPTS / "compose-up.sh", REPO_ROOT, *edge.compose_profiles)
+    if edge_changed:
+        # Solo para los que ya estaban corriendo: al resto los acaba de crear
+        # el compose con la config nueva.
+        edge.reload()
+
+    # -- 4 ----------------------------------------------------------------
     ui.step(f"Configurando bypass de auth de qBittorrent (red {config.MEDIA_SUBNET})")
     sh.run_script(
         SYS_SCRIPTS / "qbit-bypass.sh",
         config.QBIT_CONTAINER, config.QBIT_CONF, config.MEDIA_SUBNET,
     )
 
-    # -- 4 ----------------------------------------------------------------
+    # -- 5 ----------------------------------------------------------------
     ui.step("Configurando Radarr (peliculas)")
     radarr.apply_external_auth(SYS_SCRIPTS)
     radarr.wait_ready()
@@ -129,7 +143,7 @@ def main() -> int:
         radarr.container, f"{config.MEDIA_CTR_DIR}/downloads",
     )
 
-    # -- 5 ----------------------------------------------------------------
+    # -- 6 ----------------------------------------------------------------
     ui.step("Configurando Sonarr (series)")
     sonarr.apply_external_auth(SYS_SCRIPTS)
     sonarr.wait_ready()
@@ -145,7 +159,7 @@ def main() -> int:
     )
     sonarr.add_root_folder(sonarr_root)
 
-    # -- 6 ----------------------------------------------------------------
+    # -- 7 ----------------------------------------------------------------
     ui.step("Configurando SABnzbd (usenet)")
     # Va DESPUES de Radarr y Sonarr porque se conecta a los dos.
     # Antes de wait_ready: reinicia el contenedor.
@@ -169,7 +183,7 @@ def main() -> int:
         sab.SAB_NAME, sabnzbd.client_payload(sonarr.category_field, sonarr_category)
     )
 
-    # -- 7 ----------------------------------------------------------------
+    # -- 8 ----------------------------------------------------------------
     ui.step("Configurando Prowlarr (indexers)")
     # Va ULTIMO a proposito: se conecta hacia Radarr y Sonarr y necesita las
     # API keys de los dos, asi que ambos tienen que existir y responder antes.
@@ -192,7 +206,7 @@ def main() -> int:
     prowlarr.connect_app(radarr)
     prowlarr.connect_app(sonarr)
 
-    # -- 8 ----------------------------------------------------------------
+    # -- 9 ----------------------------------------------------------------
     ui.step("Listo")
     ui.detail(f"Peliculas : {radarr_root}")
     ui.detail(f"Series    : {sonarr_root}")
@@ -203,10 +217,16 @@ def main() -> int:
     ui.detail(f"Paneles (por Tailscale, http://{cfg.tailscale_ip}:PUERTO):")
     ui.detail(f"  {radarr.port} Radarr    {sonarr.port} Sonarr    {prowlarr.port} Prowlarr")
     ui.detail(f"  {config.TC_PORT} qBittorrent    {sabnzbd.port} SABnzbd")
-    ui.detail("  6767 Bazarr    5055 Jellyseerr    8265 Tdarr")
+    ui.detail("  6767 Bazarr    5055 Jellyseerr    8265 Tdarr    8096 Jellyfin")
+    print()
+    geo = (f"solo {', '.join(edge.countries)}" if edge.geo_enabled else "DESACTIVADO")
+    ui.detail(f"Internet : Jellyfin en http://<IP-VPS>/ via nginx (geo: {geo})")
     print()
     ui.warn("Si agregas indexers con Cloudflare, poneles el tag "
             f"'{prowlarr.FLARESOLVERR_TAG}' en Prowlarr.")
+    ui.warn("En Jellyfin -> Dashboard -> Networking, agrega "
+            f"{config.MEDIA_SUBNET} como known proxy: sin eso ve la IP de "
+            "nginx en vez de la del cliente y fail2ban banea al proxy.")
     ui.logfile("=== configure-stack finalizado OK ===")
     return 0
 

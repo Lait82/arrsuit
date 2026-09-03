@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # =========================================================================
 #  setup-host.sh - Configura la capa de host del media stack
-#  nginx (reverse proxy Jellyfin) + GeoIP2 (bloqueo AR) + fail2ban + UFW
+#  Tailscale (tailnet + IP en el .env) + UFW (firewall)
+#
+#  Esto es TODO lo que queda fuera de Docker, y queda fuera porque no puede
+#  estar adentro: Tailscale crea una interfaz de red del host y UFW son las
+#  reglas del host. nginx, el geo-bloqueo y fail2ban se mudaron al compose
+#  (los configura configure-stack.py).
 #
 #  Idempotente: se puede correr varias veces.
-#  Correr con sudo desde la carpeta que contiene ./nginx y ./fail2ban.
 #
-#  >>> ANTES DE CORRER: copiar .env.example a .env y completarlo <<<
-#      cp .env.example .env && nano .env
+#  ORDEN: este script primero, configure-stack.py despues. El compose necesita
+#  la TAILSCALE_IP que este script escribe en el .env.
+#
+#  >>> ANTES DE CORRER: copiar env.example a .env y completarlo <<<
+#      cp env.example .env && nano .env
 # =========================================================================
 set -euo pipefail
 
@@ -70,33 +77,46 @@ set +a
 # ----------------------------- CONFIG ------------------------------------
 # Valores por defecto si el .env no los define (SSH_PORT es opcional).
 # La IP de Tailscale NO se pone a mano; el script la deriva sola.
+# Las credenciales de MaxMind ya no se leen aca: las consume el compose
+# (contenedor geoipupdate) y configure-stack.py.
 SSH_PORT="${SSH_PORT:-22}"
-MAXMIND_ACCOUNT_ID="${MAXMIND_ACCOUNT_ID:-}"
-MAXMIND_LICENSE_KEY="${MAXMIND_LICENSE_KEY:-}"
 # -------------------------------------------------------------------------
 
-# --- Guarda: avisar si las creds de MaxMind quedaron sin setear ---
-if [[ -z "$MAXMIND_LICENSE_KEY" || "$MAXMIND_LICENSE_KEY" == "TU_LICENSE_KEY" ]]; then
-    warn "MAXMIND_LICENSE_KEY sin setear en .env: se saltea el geo-bloqueo."
-    MAXMIND_LICENSE_KEY=""
-fi
-
 # =========================================================================
-log "1/7 Instalando paquetes"
+log "1/4 Instalando paquetes"
 # =========================================================================
+# Solo ufw: nginx, geoipupdate y fail2ban ahora son contenedores.
 export DEBIAN_FRONTEND=noninteractive
 spin "Actualizando indice de paquetes (apt update)" \
     apt-get update -qq
-spin "Instalando nginx, geoip, fail2ban, ufw" \
-    apt-get install -y -qq \
-    nginx \
-    libnginx-mod-http-geoip2 \
-    geoipupdate \
-    fail2ban \
-    ufw
+spin "Instalando ufw" \
+    apt-get install -y -qq ufw
 
 # =========================================================================
-log "2/7 Tailscale: instalacion y autenticacion"
+log "2/4 Migracion: apagando nginx y fail2ban del host"
+# =========================================================================
+# Si venis de la version vieja de este script, nginx esta instalado en el host
+# y tiene tomado el puerto 80. El contenedor nginx no va a poder bindearlo y el
+# compose falla con "address already in use". fail2ban no choca puerto, pero
+# tenerlo duplicado significa dos daemons leyendo el mismo log y peleandose las
+# reglas de iptables.
+#
+# Se desactivan, NO se desinstalan: si algo sale mal, un 'systemctl enable
+# --now nginx' te devuelve lo que tenias.
+for svc in nginx fail2ban; do
+    if systemctl is-enabled "$svc" >/dev/null 2>&1 || systemctl is-active "$svc" >/dev/null 2>&1; then
+        warn "$svc corre en el host: lo apago para que lo tome el contenedor."
+        systemctl disable --now "$svc" >/dev/null 2>&1 || true
+        log "  $svc desactivado (para revertir: systemctl enable --now $svc)"
+    fi
+done
+
+# El cron de geoipupdate del host tampoco tiene sentido ya: la base la baja el
+# contenedor geoipupdate a su propio volumen.
+rm -f /etc/cron.weekly/geoipupdate
+
+# =========================================================================
+log "3/4 Tailscale: instalacion y autenticacion"
 # =========================================================================
 if ! command -v tailscale >/dev/null 2>&1; then
     spin "Instalando Tailscale" \
@@ -142,103 +162,7 @@ log "IP escrita en $ENV_FILE (TAILSCALE_IP=$TAILSCALE_IP)"
 # o pasarle --env-file, para que la variable se resuelva.
 
 # =========================================================================
-log "3/7 GeoIP2: bajando base de datos de MaxMind"
-# =========================================================================
-if [[ -n "$MAXMIND_LICENSE_KEY" ]]; then
-    cat > /etc/GeoIP.conf <<EOF
-AccountID $MAXMIND_ACCOUNT_ID
-LicenseKey $MAXMIND_LICENSE_KEY
-EditionIDs GeoLite2-Country
-EOF
-    spin "Descargando base de datos GeoLite2" \
-        geoipupdate || warn "geoipupdate fallo. Revisar credenciales de MaxMind."
-
-    # Detectar donde quedo la DB: /var/lib/GeoIP (geoipupdate nuevo) o
-    # /usr/share/GeoIP (versiones viejas). No asumimos la ruta.
-    GEOIP_DB="$(find /var/lib/GeoIP /usr/share/GeoIP -name 'GeoLite2-Country.mmdb' 2>/dev/null | head -n1 || true)"
-    if [[ -z "$GEOIP_DB" ]]; then
-        warn "No encontré GeoLite2-Country.mmdb tras el update. Se configura SIN geo-bloqueo."
-        GEO_ENABLED=0
-    else
-        log "Base GeoIP encontrada en: $GEOIP_DB"
-        GEO_ENABLED=1
-    fi
-
-    # Cron semanal para mantener la DB al dia
-    cat > /etc/cron.weekly/geoipupdate <<'EOF'
-#!/bin/sh
-/usr/bin/geoipupdate
-EOF
-    chmod +x /etc/cron.weekly/geoipupdate
-else
-    warn "Sin license key: nginx se configura SIN geo-bloqueo (comentado)."
-    GEO_ENABLED=0
-fi
-
-# =========================================================================
-log "4/7 nginx: colocando configs"
-# =========================================================================
-# Server block y headers de proxy
-install -m 0644 "$SCRIPT_DIR/configs/nginx/jellyfin"            /etc/nginx/sites-available/jellyfin
-install -m 0644 "$SCRIPT_DIR/configs/nginx/proxy_jellyfin.conf" /etc/nginx/proxy_jellyfin.conf
-
-# Habilitar el sitio y sacar el default
-ln -sf /etc/nginx/sites-available/jellyfin /etc/nginx/sites-enabled/jellyfin
-rm -f /etc/nginx/sites-enabled/default
-
-# Insertar el bloque geoip2 dentro de http { } si no esta ya
-if [[ "$GEO_ENABLED" -eq 1 ]]; then
-    if ! grep -q "geoip2 .*GeoLite2-Country.mmdb" /etc/nginx/nginx.conf; then
-        # Toma el snippet y le corrige la ruta a la DB detectada ($GEOIP_DB)
-        GEO_SNIPPET="$(sed "s|geoip2 .*GeoLite2-Country.mmdb|geoip2 $GEOIP_DB|" \
-            "$SCRIPT_DIR/configs/nginx/geoip2-snippet.conf" | sed 's/^/\t/')"
-        awk -v snip="$GEO_SNIPPET" '
-            /^http[[:space:]]*{/ && !done { print; print snip; done=1; next }
-            { print }
-        ' /etc/nginx/nginx.conf > /etc/nginx/nginx.conf.tmp
-        mv /etc/nginx/nginx.conf.tmp /etc/nginx/nginx.conf
-        log "Bloque geoip2 insertado en nginx.conf (DB: $GEOIP_DB)"
-    else
-        # Ya existe: corregir la ruta por si apunta a una DB en otro lado
-        sed -i "s|geoip2 .*GeoLite2-Country.mmdb|geoip2 $GEOIP_DB|" /etc/nginx/nginx.conf
-        log "Bloque geoip2 ya presente; ruta de DB actualizada a $GEOIP_DB"
-    fi
-else
-    # Sin geo: comentar el 'if ($allowed_country = no)' para que nginx valide
-    sed -i 's/^\(\s*\)\(if (\$allowed_country = no) {\)/\1# \2/' /etc/nginx/sites-available/jellyfin
-    sed -i 's/^\(\s*\)\(return 403;\)\s*$/\1# \2/'               /etc/nginx/sites-available/jellyfin
-    sed -i 's/^\(\s*\)\(}\s*# geo-close\)/\1# \2/'               /etc/nginx/sites-available/jellyfin || true
-fi
-
-# Validar sintaxis ANTES de recargar
-if nginx -t; then
-    systemctl reload nginx
-    log "nginx recargado OK"
-else
-    die "nginx -t fallo. Revisar config antes de continuar. NO se recargo."
-fi
-
-# =========================================================================
-log "5/7 fail2ban: filtro y jail de Jellyfin"
-# =========================================================================
-install -m 0644 "$SCRIPT_DIR/configs/fail2ban/jellyfin.conf"  /etc/fail2ban/filter.d/jellyfin.conf
-install -m 0644 "$SCRIPT_DIR/configs/fail2ban/jellyfin.local" /etc/fail2ban/jail.d/jellyfin.local
-
-# Validar el regex contra logs reales si existen
-JELLY_LOG="$(find /srv/config/jellyfin/log -maxdepth 1 -name '*.log' 2>/dev/null | head -n1 || true)"
-if [[ -n "$JELLY_LOG" ]]; then
-    log "Validando regex contra $JELLY_LOG"
-    fail2ban-regex "$JELLY_LOG" /etc/fail2ban/filter.d/jellyfin.conf || \
-        warn "El regex no matcheo. Ajustar failregex segun tu version de Jellyfin."
-else
-    warn "No hay logs de Jellyfin todavia. Validar el regex despues de que arranque."
-fi
-
-systemctl enable fail2ban
-systemctl restart fail2ban
-
-# =========================================================================
-log "6/7 UFW: firewall"
+log "4/4 UFW: firewall"
 # =========================================================================
 # ORDEN IMPORTANTE: permitir SSH y Tailscale ANTES de enable, o te lockeas.
 # Guarda: la interfaz tailscale0 tiene que existir (Tailscale ya levantado).
@@ -254,25 +178,36 @@ ufw allow 41641/udp         comment 'Tailscale'
 ufw allow 80/tcp            comment 'Jellyfin via nginx'
 ufw --force enable
 
+# El 80/tcp de arriba es mas declarativo que efectivo: Docker publica el puerto
+# escribiendo sus propias reglas de DNAT, que se evaluan ANTES que las cadenas
+# de UFW. O sea que el 80 del contenedor nginx queda abierto lo pongas o no.
+# La regla queda igual para que 'ufw status' cuente la verdad de que puertos se
+# supone que estan abiertos.
+#
+# El corolario es el de siempre en este stack: lo que protege a los paneles NO
+# es UFW sino el bind a ${TAILSCALE_IP} en el compose. Un servicio publicado en
+# 0.0.0.0 estaria expuesto aunque UFW diga deny.
+
 # =========================================================================
-log "7/7 Listo. Verificaciones pendientes:"
+log "Listo. Ahora corré configure-stack.py:"
 # =========================================================================
 cat <<EOF
 
-  [ ] Desde el celu con DATOS MOVILES (fuera de tu red), probar:
-        - http://<IP-VPS>/         -> deberia entrar Jellyfin (o 403 si estas fuera de AR)
-        - http://<IP-VPS>:9696/    -> NO deberia responder (Prowlarr, solo Tailscale)
-        - http://<IP-VPS>:7878/    -> NO deberia responder (Radarr, solo Tailscale)
-      Si los puertos de los *arr responden, Docker se salteo UFW: confirmar
-      que los binds a $TAILSCALE_IP esten en el compose.
+      sudo ./configure-stack.py
 
-  [ ] En Jellyfin: Dashboard > Networking > agregar 127.0.0.1 como known proxy
-      (para que loguee la IP real del cliente y fail2ban banee bien).
+  Ese script levanta el compose (incluido nginx, fail2ban y el geo-bloqueo)
+  y configura los servicios. Este de aca solo dejo el host listo.
 
-  [ ] Probar 4 logins fallidos a proposito y verificar el ban:
-        sudo fail2ban-client status jellyfin
+  Verificaciones para despues, desde el celu con DATOS MOVILES:
 
-  [ ] Confirmar que segui entrando desde AR tras activar el geo-bloqueo.
+  [ ] http://<IP-VPS>/         -> entra Jellyfin (o 403 si el geo esta activo
+                                  y estas fuera de los paises permitidos)
+  [ ] http://<IP-VPS>:9696/    -> NO responde (Prowlarr, solo Tailscale)
+  [ ] http://<IP-VPS>:7878/    -> NO responde (Radarr, solo Tailscale)
+  [ ] http://<IP-VPS>:8096/    -> NO responde (Jellyfin directo, solo Tailscale)
+
+      Si alguno responde, revisá que los binds a $TAILSCALE_IP esten en el
+      compose: es lo unico que los tapa, UFW no alcanza contra Docker.
 
 EOF
 log "setup-host.sh finalizado."
