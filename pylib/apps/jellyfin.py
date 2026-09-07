@@ -92,12 +92,18 @@ class Jellyfin:
             secret=auth or None,
         )
 
-    def wait_ready(self, attempts: int = 30, delay: int = 2) -> None:
+    def wait_ready(self, attempts: int = 90, delay: int = 2) -> None:
         """Espera por un endpoint PUBLICO.
 
         /System/Info/Public no pide auth: sirve para saber si el servidor esta
         arriba incluso antes de tener API key, que es justo el caso de la
         primera corrida.
+
+        La espera es MAS LARGA que la del resto de las apps (3 min contra 1):
+        mientras arranca, Jellyfin contesta 503 'Server is loading' en vez de
+        no contestar, y ese arranque incluye crear y migrar su base SQLite y
+        cargar los plugins. Con el minuto que le alcanza a los *arr, la primera
+        corrida aborta un paso antes del final con el servidor sano.
         """
         ok = ui.wait_for(
             "Esperando a que Jellyfin responda",
@@ -106,7 +112,10 @@ class Jellyfin:
             delay,
         )
         if not ok:
-            ui.die(f"Jellyfin no respondio en {self.url}. ¿El contenedor esta arriba?")
+            ui.die(
+                f"Jellyfin no respondio en {self.url} despues de "
+                f"{attempts * delay}s. Mira 'docker logs jellyfin'."
+            )
 
     # -- API key ----------------------------------------------------------
     def ensure_api_key(self) -> None:
