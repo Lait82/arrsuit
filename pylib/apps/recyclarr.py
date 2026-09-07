@@ -26,7 +26,9 @@ CONTAINER = "recyclarr"
 
 # El contenedor monta /srv/config/recyclarr como /config, y recyclarr busca su
 # config en /config/recyclarr.yml (RECYCLARR_CONFIG_DIR=/config en la imagen).
-CONFIG_HOST_PATH = "/srv/config/recyclarr/recyclarr.yml"
+CONFIG_HOST_DIR = "/srv/config/recyclarr"
+CONFIG_CTR_DIR = "/config"
+CONFIG_HOST_PATH = f"{CONFIG_HOST_DIR}/recyclarr.yml"
 
 
 class Recyclarr:
@@ -84,6 +86,18 @@ class Recyclarr:
         return text
 
     def install_config(self, sys_scripts: Path, tmpdir: Path, radarr, sonarr) -> None:
+        # El dueño de /config va ANTES de escribir nada adentro. Esta imagen no
+        # es de LinuxServer: corre como uid 1000 y no chownea /config al
+        # arrancar, asi que hereda el root:root con el que Docker crea el
+        # directorio del bind cuando todavia no existe en el host. Recyclarr se
+        # guarda el estado en /config/state, y sin esto el sync muere con
+        # 'Access to the path /config/state is denied'.
+        sh.run_script(
+            sys_scripts / "ensure-dir.sh",
+            CONFIG_HOST_DIR, config.PUID, config.PGID,
+            CONTAINER, CONFIG_CTR_DIR,
+        )
+
         rendered = tmpdir / "recyclarr.yml"
         rendered.write_text(self.render(radarr, sonarr))
         sh.run_script(

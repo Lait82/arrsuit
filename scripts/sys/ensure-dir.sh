@@ -5,6 +5,16 @@
 #  Crea una carpeta en el host con el dueño correcto y despues VERIFICA que el
 #  contenedor pueda escribir en ella.
 #
+#  EL DUEÑO SE APLICA A TODO EL ARBOL, no solo a la carpeta de arriba: Docker
+#  crea los directorios de un bind como root cuando no existen todavia, y las
+#  imagenes que no son de LinuxServer (recyclarr, tdarr, jellyseerr) no
+#  chownean su /config al arrancar. Con el chown a un solo nivel, un subdir
+#  que quedo de root pasa desapercibido hasta que la app falla al escribir.
+#
+#  Se corrigen SOLO las entradas cuyo dueño no es el esperado, en vez de
+#  reescribir todo el arbol: esto tambien corre sobre /srv/media, y ahi un
+#  'chown -R' a secas tocaria la biblioteca entera en cada pasada.
+#
 #  La verificacion se hace DESDE ADENTRO del contenedor porque es el unico
 #  lugar donde la respuesta cuenta. Un chequeo en el host no puede ver:
 #    - un bind montado :ro
@@ -30,7 +40,15 @@ if [[ ! -d "$HOST_PATH" ]]; then
     info "Creando $HOST_PATH en el host..."
     mkdir -p "$HOST_PATH" || die "No pude crear $HOST_PATH"
 fi
-chown "${PUID}:${PGID}" "$HOST_PATH" || die "Fallo el chown de $HOST_PATH"
+# -h para actuar sobre el symlink y no sobre lo que apunta: en /srv/media un
+# link podria salir del arbol y no es asunto nuestro.
+wrong=$(find "$HOST_PATH" \( ! -user "$PUID" -o ! -group "$PGID" \) -print -quit)
+if [[ -n "$wrong" ]]; then
+    info "Corrigiendo el dueño de $HOST_PATH a ${PUID}:${PGID}..."
+    find "$HOST_PATH" \( ! -user "$PUID" -o ! -group "$PGID" \) \
+        -exec chown -h "${PUID}:${PGID}" {} + \
+        || die "Fallo el chown de $HOST_PATH"
+fi
 
 if docker exec -u "$PUID" "$CONTAINER" test -w "$CTR_PATH" 2>/dev/null; then
     info "Permisos OK: $CONTAINER puede escribir en $CTR_PATH"
