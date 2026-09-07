@@ -37,9 +37,10 @@
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
-from pylib.apps import host, proxy, sab, servarr
+from pylib.apps import host, jellyfin, proxy, recyclarr, sab, servarr
 from pylib.tools import sh, ui
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -48,7 +49,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from pylib.tools import config  # noqa: E402
 
 SYS_SCRIPTS = REPO_ROOT / "scripts" / "sys"
-TOTAL_STEPS = 10
+TOTAL_STEPS = 12
 
 
 def check_prereqs() -> None:
@@ -72,6 +73,8 @@ def main() -> int:
     prowlarr = servarr.Prowlarr(cfg)
     sabnzbd = sab.Sabnzbd(cfg)
     edge = proxy.Proxy(cfg, REPO_ROOT)
+    quality = recyclarr.Recyclarr(cfg, REPO_ROOT)
+    media_server = jellyfin.Jellyfin(cfg)
 
     radarr_category = cfg.get("radarr", "downloadClientCategory")
     sonarr_category = cfg.get("sonarr", "downloadClientCategory")
@@ -200,8 +203,8 @@ def main() -> int:
 
     # -- 9 ----------------------------------------------------------------
     ui.step("Configurando Prowlarr (indexers)")
-    # Va ULTIMO a proposito: se conecta hacia Radarr y Sonarr y necesita las
-    # API keys de los dos, asi que ambos tienen que existir y responder antes.
+    # Se conecta hacia Radarr y Sonarr y necesita las API keys de los dos, asi
+    # que ambos tienen que existir y responder antes.
     prowlarr.apply_external_auth(SYS_SCRIPTS)
     prowlarr.wait_ready()
     prowlarr.add_flaresolverr()
@@ -222,6 +225,43 @@ def main() -> int:
     prowlarr.connect_app(sonarr)
 
     # -- 10 ---------------------------------------------------------------
+    ui.step("Aplicando las TRaSH Guides (Recyclarr)")
+    # VA ULTIMO: es la pasada de afinado sobre Radarr y Sonarr ya funcionando.
+    # Necesita las API keys de los dos, y el sync les reescribe los quality
+    # profiles, asi que conviene que ya tengan su config definitiva.
+    with tempfile.TemporaryDirectory(prefix="recyclarr-") as tmpdir:
+        quality.install_config(SYS_SCRIPTS, Path(tmpdir), radarr, sonarr)
+    quality.sync(SYS_SCRIPTS)
+
+    # -- 11 ---------------------------------------------------------------
+    ui.step("Configurando Jellyfin (transcode + avisos de biblioteca)")
+    # Todo esto necesita una API key, y crear una requiere estar autenticado.
+    # Sin credenciales el paso se saltea entero en vez de abortar: el resto del
+    # stack funciona igual.
+    if not media_server.configured:
+        ui.warn("Sin JELLYFIN_USER y JELLYFIN_PASSWORD en el .env: se saltea.")
+        ui.detail("Son los de tu usuario admin de Jellyfin. Con eso el script")
+        ui.detail("crea la API key solo y la guarda en el .env.")
+    else:
+        media_server.wait_ready()
+
+        # Login -> crear/reusar la key -> escribirla en el .env. A partir de la
+        # segunda corrida entra por la key y ni se autentica.
+        media_server.ensure_api_key()
+
+        # Borrado de segmentos HLS: sin esto los .ts de un transcode que el
+        # cliente corto a la mitad quedan huerfanos y se van acumulando.
+        media_server.configure_transcoding()
+
+        # El aviso al importar. Jellyfin descubre archivos nuevos mirando el
+        # filesystem, y ese monitor puede agarrar la carpeta a mitad de una
+        # importacion: queda la serie con episodios sin archivo asociado.
+        # Con esto avisa el que sabe que termino de escribir.
+        # El monitor en tiempo real de Jellyfin queda igual: son complementarios.
+        for app in (radarr, sonarr):
+            app.upsert_jellyfin_notification(media_server.name, media_server)
+
+    # -- 12 ---------------------------------------------------------------
     ui.step("Listo")
     ui.detail(f"Peliculas : {radarr_root}")
     ui.detail(f"Series    : {sonarr_root}")

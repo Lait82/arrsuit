@@ -11,6 +11,7 @@ El log a archivo guarda cada request/response completo. La consola muestra el
 resumen; cuando algo falla, el detalle esta en el archivo.
 """
 
+import re
 import sys
 import threading
 import time
@@ -70,12 +71,17 @@ def _mask(msg: str) -> str:
     return msg
 
 
+# Colores y control de cursor. La salida de los scripts se copia al log tal
+# cual viene, y lib.sh colorea con \033[...: sin esto el log queda ilegible.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
 def logfile(msg: str) -> None:
     if _log_path is None:
         return
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _log_path.open("a") as fh:
-        fh.write(f"[{stamp}] {_mask(msg)}\n")
+        fh.write(f"[{stamp}] {_ANSI.sub('', _mask(msg))}\n")
 
 
 def step(title: str) -> None:

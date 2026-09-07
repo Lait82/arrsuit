@@ -158,19 +158,40 @@ Configurá en este orden (cada uno depende del anterior):
 
 ## Paso 5 — Recyclarr (calidad automática)
 
-Recyclarr aplica los custom formats de TRaSH Guides a Radarr/Sonarr.
+**Ya lo configura el orquestador** (paso 10). Aplica las TRaSH Guides a Radarr y
+Sonarr: los tamaños por calidad, el quality profile y los custom formats con sus
+puntajes.
 
-1. Generá una config base:
-   ```bash
-   docker exec recyclarr recyclarr config create
-   ```
-2. Editá `/srv/config/recyclarr/recyclarr.yml`: pegá las API keys de Radarr y
-   Sonarr (las sacás de *Settings → General* en cada uno) y elegí los perfiles
-   de calidad que quieras (ej: HD Bluray + WEB).
-3. Corré una sync manual para probar:
-   ```bash
-   docker exec recyclarr recyclarr sync
-   ```
+Qué perfil se aplica sale de `configs/services_setup.conf`, en `.recyclarr`:
+
+| Servicio | Perfil por defecto |
+|----------|--------------------|
+| Radarr   | HD Bluray + WEB    |
+| Sonarr   | WEB-1080p          |
+
+Para cambiarlo necesitás el `trash_id` del perfil que quieras. La lista sale de
+los templates oficiales que el propio contenedor cachea:
+
+```bash
+grep -m1 -H "trash_id" /srv/config/recyclarr/resources/config-templates/git/official/radarr/templates/*.yml
+```
+
+Pegás el `trash_id` y el nombre en `services_setup.conf` y volvés a correr
+`sudo ./configure-stack.py`.
+
+> ⚠️ **Cambiar el quality profile mueve tu biblioteca.** Radarr y Sonarr
+> re-evalúan lo que ya tenés contra el cutoff nuevo y encolan upgrades de todo lo
+> que quede por debajo. En una biblioteca grande eso son muchas descargas.
+
+El contenedor además corre un sync solo una vez por día (`CRON_SCHEDULE=@daily`),
+así que los cambios del guide llegan sin que hagas nada. El paso del orquestador
+existe para aplicarlo en el momento y no esperar hasta 24 hs.
+
+Para ver qué haría sin aplicar nada:
+
+```bash
+docker exec recyclarr recyclarr sync --preview
+```
 
 ---
 
@@ -205,9 +226,72 @@ un servicio publicado en `0.0.0.0` quedaría expuesto aunque UFW diga `deny`.
 
 ---
 
-## Paso 6.5 — Jellyfin detrás del proxy: `known proxies`
+## Paso 6.5 — Jellyfin: lo que configura el orquestador y lo que no
 
-**Esto no es opcional si querés que fail2ban sirva de algo.**
+El **paso 11** deja puestas dos cosas. Lo único que tenés que cargar en el
+`.env` son **`JELLYFIN_USER` y `JELLYFIN_PASSWORD`** (tu cuenta admin):
+
+```bash
+JELLYFIN_USER=manu
+JELLYFIN_PASSWORD=...
+JELLYFIN_API_KEY=          # se escribe sola, dejala vacía
+```
+
+La API key **no se puede sacar de ningún archivo**: Jellyfin las crea a pedido y
+las guarda hasheadas, y crear una requiere estar autenticado (`POST /Auth/Keys`
+pide elevación). Así que el script se loguea, crea la key, y la escribe en el
+`.env` — igual que hace el paso 1 con `TAILSCALE_IP`.
+
+De la segunda corrida en adelante entra por la key y ni se autentica. Si la
+borrás del Dashboard, detecta que no sirve y genera otra. En el Dashboard
+aparece como **`arrsuit-orchestrator`**.
+
+> El `.env` pasa a tener tu contraseña de admin, así que el script le pone
+> permisos **600** al escribir la key. Venía en 644, o sea legible por cualquier
+> usuario del host.
+
+Sin esas credenciales el paso se saltea con un aviso y el resto del stack
+funciona igual.
+
+### Aviso de Radarr/Sonarr al importar
+
+Jellyfin descubre archivos nuevos mirando el filesystem, y ese monitor puede
+agarrar la carpeta **a mitad de una importación**. El resultado es una serie que
+aparece con episodios sin archivo asociado y un *"unable to find a valid media
+source to play"* al darle play.
+
+Con el aviso puesto, el que avisa es el que sabe que terminó de escribir. Se
+registra en Radarr y Sonarr como conector *Emby / Jellyfin* con **Update
+Library**, y dispara en import, upgrade, rename y borrado.
+
+> El **Real Time Monitoring** de Jellyfin queda encendido igual: son
+> complementarios. El aviso cubre las importaciones; el monitor, los archivos que
+> aparecen por fuera de Radarr/Sonarr (algo que copiaste a mano).
+
+### Borrado de segmentos de transcode
+
+Jellyfin escribe los `.ts` del transcode en su cache y por defecto los deja
+hasta terminar. Si el cliente corta a la mitad, quedan huérfanos acumulándose.
+
+Se configura en `.jellyfin.transcoding` de `services_setup.conf`:
+
+| Clave | Default | Qué hace |
+|-------|---------|----------|
+| `deleteSegments` | `true` | borra cada segmento apenas el cliente lo bajó |
+| `keepSegmentsSeconds` | `3600` | retención máxima (Jellyfin usa 720 por defecto) |
+
+Es la limpieza nativa de Jellyfin: sabe qué sesiones están activas, así que no
+hay riesgo de que borre algo que se está reproduciendo. Por eso no hace falta un
+cron aparte.
+
+> Necesita Jellyfin **10.10 o superior**. En versiones anteriores esas opciones
+> no existen y el paso avisa y sigue.
+
+---
+
+## Paso 6.6 — `known proxies` (esto sí es manual)
+
+**No es opcional si querés que fail2ban sirva de algo.**
 
 Jellyfin loguea la IP de quien le pega, que ahora es el contenedor de nginx. Hay
 que decirle que confíe en el header `X-Forwarded-For`:

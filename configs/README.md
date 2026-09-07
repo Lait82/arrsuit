@@ -12,6 +12,7 @@ Quién hace qué:
 | Tailscale, UFW | host | 1 — `pylib/apps/host.py` |
 | nginx, fail2ban, geoipupdate | contenedores | 3 — `pylib/apps/proxy.py` |
 | Jellyfin y el resto del stack | contenedores | 4 en adelante |
+| Recyclarr (TRaSH Guides) | contenedor | 10 — `pylib/apps/recyclarr.py` |
 
 Todo lo configura **`configure-stack.py`**, un solo comando. Tailscale y UFW
 quedan afuera de Docker porque no pueden estar adentro (uno crea una interfaz de
@@ -66,9 +67,11 @@ configs/
 │   ├── proxy_jellyfin.conf    # headers de proxy compartidos (incl. WebSockets)
 │   ├── geoip-on.conf.tmpl     # bloque geoip2 + map  (geo ACTIVADO)
 │   └── geoip-off.conf         # map que deja pasar todo (geo DESACTIVADO)
-└── fail2ban/
-    ├── filter.d/jellyfin.conf # filtro (regex de login fallido)
-    └── jail.d/jellyfin.local  # jail (umbrales de baneo + cadena de iptables)
+├── fail2ban/
+│   ├── filter.d/jellyfin.conf # filtro (regex de login fallido)
+│   └── jail.d/jellyfin.local  # jail (umbrales de baneo + cadena de iptables)
+└── recyclarr/
+    └── recyclarr.yml.tmpl     # plantilla del sync de TRaSH Guides
 ```
 
 `configure-stack.py` los copia a `/srv/config` en cada corrida y, si cambiaron,

@@ -204,6 +204,107 @@ class Servarr:
             "tags": [],
         }
 
+    # --- Notificaciones ---------------------------------------------------
+    #  Eventos que disparan el aviso a Jellyfin. Son campos de primer nivel de
+    #  la notificacion (no van en 'fields') y NO son los mismos en Radarr y en
+    #  Sonarr: Radarr tiene onMovieDelete/onMovieFileDelete y Sonarr
+    #  onSeriesDelete/onEpisodeFileDelete. Por eso se aplican solo los que el
+    #  schema del servidor efectivamente trae, en vez de listarlos por app.
+    NOTIFY_TRIGGERS = (
+        "onDownload",                    # importo algo nuevo
+        "onUpgrade",                     # reemplazo un archivo por uno mejor
+        "onRename",                      # renombro archivos
+        "onMovieDelete", "onMovieFileDelete", "onMovieFileDeleteForUpgrade",
+        "onSeriesDelete", "onEpisodeFileDelete", "onEpisodeFileDeleteForUpgrade",
+    )
+
+    def _notification_definition(self, implementation: str) -> dict:
+        """Trae del servidor la definicion de un tipo de notificacion.
+
+        Mismo criterio que con los indexers: cada definicion viene con su lista
+        de 'fields' y sus defaults. Armar el payload a mano es adivinar nombres
+        de campos que cambian entre versiones.
+        """
+        resp = self.call("GET", "/notification/schema")
+        if not resp.ok:
+            ui.die(f"No pude leer el schema de notificaciones de {self.name} "
+                   f"(HTTP {resp.status}).")
+
+        for item in resp.json() or []:
+            if item.get("implementation") == implementation:
+                return item
+
+        ui.die(
+            f"{self.name} no ofrece notificaciones de tipo '{implementation}'."
+        )
+
+    def upsert_jellyfin_notification(self, name: str, jellyfin) -> None:
+        """Hace que esta app le avise a Jellyfin cuando importa. Idempotente.
+
+        POR QUE: Jellyfin descubre archivos nuevos mirando el filesystem, y ese
+        monitor puede agarrar la carpeta a mitad de una importacion. El
+        resultado es una serie que aparece con episodios sin archivo asociado
+        ("unable to find a valid media source"). Con esto, el que avisa es el
+        que sabe que termino de escribir.
+
+        'MediaBrowser' es como Radarr y Sonarr llaman internamente al conector
+        de Emby/Jellyfin; en la UI figura como "Emby / Jellyfin".
+        """
+        resp = self.call("GET", "/notification")
+        if not resp.ok:
+            ui.die(f"No pude listar notificaciones de {self.name} (HTTP {resp.status}).")
+        for item in resp.json() or []:
+            if item.get("name") == name:
+                ui.warn(f"'{name}' ya existe en {self.name} (id {item.get('id')}). "
+                        "No se duplica.")
+                return
+
+        payload = copy.deepcopy(self._notification_definition("MediaBrowser"))
+        payload["name"] = name
+
+        # Solo los triggers que este servidor conoce.
+        for trigger in self.NOTIFY_TRIGGERS:
+            if trigger in payload:
+                payload[trigger] = True
+
+        # host/port por separado y no una URL: es lo que espera el conector.
+        # Va el nombre del contenedor porque quien hace la request es Radarr o
+        # Sonarr, desde adentro de la red 'media'.
+        overrides = {
+            "host": jellyfin.container,
+            "port": jellyfin.port,
+            "useSsl": False,
+            "apiKey": jellyfin.api_key,
+            "updateLibrary": True,   # <- lo unico que realmente queremos
+            "notify": False,         # sin notificaciones al usuario en la UI
+        }
+        present = set()
+        for field in payload.get("fields", []):
+            if field.get("name") in overrides:
+                field["value"] = overrides[field["name"]]
+                present.add(field["name"])
+        for missing in overrides.keys() - present:
+            payload.setdefault("fields", []).append(
+                {"name": missing, "value": overrides[missing]}
+            )
+
+        ui.info(f"Probando {self.name} -> Jellyfin (endpoint /test)...")
+        test = self.call("POST", "/notification/test", payload)
+        if not test.ok:
+            ui.warn(f"El test fallo (HTTP {test.status}):")
+            print(test.errors())
+            ui.warn("Revisá JELLYFIN_API_KEY en el .env.")
+            ui.die("Abortando: no guardo una notificacion que no conecta.")
+        ui.info(f"Test OK: {self.name} alcanza a Jellyfin.")
+
+        saved = self.call("POST", "/notification", payload)
+        if not saved.ok:
+            ui.warn(f"Fallo al agregar (HTTP {saved.status}):")
+            print(saved.errors())
+            ui.die(f"No se pudo agregar '{name}' a {self.name}.")
+        ui.info(f"'{name}' agregado a {self.name} "
+                f"(id {(saved.json() or {}).get('id', '?')})")
+
 
 class Radarr(Servarr):
     name = "Radarr"

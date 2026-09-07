@@ -12,6 +12,7 @@ con nadie, se puede correr a mano para debuggear, y su contrato es explicito.
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from . import ui
@@ -20,8 +21,15 @@ from . import ui
 def run_script(script: Path, *args: str, capture: bool = False) -> str:
     """Corre un script de scripts/sys/ y aborta si falla.
 
-    Con capture=False la salida del script va directo a la consola, asi los
-    info() de bash se mezclan naturalmente con los de Python.
+    Con capture=False la salida del script se copia a la consola Y al log a
+    medida que sale, asi los info() de bash se mezclan naturalmente con los de
+    Python sin que el log se pierda el detalle. Importa cuando algo falla
+    lejos de la terminal: el rc suelto no alcanza para saber que paso.
+
+    El precio es que los scripts dejan de ver un TTY, asi que docker compose
+    imprime en modo plano (una linea por evento) en vez de las barras de
+    progreso que se redibujan. Para el log es una mejora: las barras dejaban
+    basura y ningun dato.
     """
     if not script.is_file():
         ui.die(f"Falta el script {script}")
@@ -41,10 +49,24 @@ def run_script(script: Path, *args: str, capture: bool = False) -> str:
             ui.die(f"Fallo {script.name} (rc={proc.returncode})")
         return proc.stdout.strip()
 
-    proc = subprocess.run(cmd)
-    ui.logfile(f"    RC: {proc.returncode}")
-    if proc.returncode != 0:
-        ui.die(f"Fallo {script.name} (rc={proc.returncode})")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,   # un solo flujo: preserva el orden real
+        text=True,
+        bufsize=1,                  # linea a linea, para que no se vea trabado
+        errors="replace",           # las barras de progreso traen bytes raros
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        ui.logfile(f"    | {line.rstrip()}")
+    rc = proc.wait()
+
+    ui.logfile(f"    RC: {rc}")
+    if rc != 0:
+        ui.die(f"Fallo {script.name} (rc={rc})")
     return ""
 
 
