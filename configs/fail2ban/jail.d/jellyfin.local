@@ -1,0 +1,30 @@
+# =========================================================================
+#  Jail de fail2ban para Jellyfin -> /config/fail2ban/jail.d/jellyfin.local
+#  4 intentos fallidos en 1h -> ban de 24h
+#
+#  chain = DOCKER-USER es EL detalle de esta config.
+#  Ahora que nginx corre en un contenedor, el trafico de internet no termina en
+#  el host: Docker lo hace DNAT y lo reenvia al contenedor, o sea que pasa por
+#  FORWARD y nunca toca INPUT. Un ban en INPUT (el default de fail2ban) se
+#  aplicaria a una cadena por la que el atacante no pasa: no baneas nada.
+#  DOCKER-USER es la cadena que Docker deja libre justo en ese camino.
+#
+#  banaction allports y no multiport: en DOCKER-USER el paquete ya viene con el
+#  puerto traducido al del contenedor, asi que filtrar por 'http' seria fragil.
+#  Al atacante se lo banea entero y listo.
+#
+#  logpath: la carpeta de logs de Jellyfin entra al contenedor por bind
+#  read-only en /remotelogs/jellyfin (convencion de la imagen de LinuxServer).
+# =========================================================================
+
+[jellyfin]
+enabled   = true
+backend   = auto
+protocol  = tcp
+filter    = jellyfin
+logpath   = /remotelogs/jellyfin/*.log
+maxretry  = 4
+findtime  = 3600
+bantime   = 86400
+chain     = DOCKER-USER
+banaction = iptables-allports

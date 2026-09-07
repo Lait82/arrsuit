@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+# =========================================================================
+#  configure-stack.py - Orquesta y configura el media stack de punta a punta
+#
+#  Pensado para alguien que apenas se maneja: UN SOLO COMANDO deja todo listo,
+#  desde el firewall del host hasta los indexers de Prowlarr.
+#
+#  ARQUITECTURA:
+#    Este archivo es el ORQUESTADOR. Define los pasos y decide QUE hay que
+#    hacer; el COMO se reparte segun la herramienta que corresponde:
+#
+#      python (pylib/)      -> HTTP, JSON, y toda la logica de configuracion
+#                              via API. Es donde bash sufria: no puede devolver
+#                              estructuras y armar payloads con jq es fragil.
+#      bash (scripts/sys/)  -> lo que toca el sistema: apt, systemctl, ufw,
+#                              docker compose, mkdir/chown/chmod, docker exec,
+#                              y la cirugia sobre archivos de config.
+#
+#    Los scripts de bash reciben todo por argumentos: no comparten globales,
+#    se pueden correr a mano para debuggear y su contrato es explicito.
+#
+#  Idempotente de punta a punta: se puede correr las veces que haga falta. Cada
+#  paso chequea antes de actuar, asi que una segunda pasada no reinstala
+#  paquetes ni reconstruye el firewall.
+#
+#  EL UNICO PUNTO DONDE PUEDE FRENAR es el paso 1, si Tailscale todavia no esta
+#  autenticado: eso abre una URL en el navegador y no se automatiza. Autenticas
+#  y volves a correr esto mismo.
+#
+#  Config editable -> configs/services_setup.conf
+#  Secretos        -> .env  (TAILSCALE_IP la escribe el paso 1)
+#  LOG             -> ./configure-stack.log  (cada request/response)
+#
+#
+#  >>> Requiere: docker, python3. Corre con sudo (toca el host y docker).
+# =========================================================================
+
+import os
+import sys
+from pathlib import Path
+
+from pylib.apps import host, proxy, sab, servarr
+from pylib.tools import sh, ui
+
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from pylib.tools import config  # noqa: E402
+
+SYS_SCRIPTS = REPO_ROOT / "scripts" / "sys"
+TOTAL_STEPS = 10
+
+
+def check_prereqs() -> None:
+    if os.geteuid() != 0:
+        ui.print_fatal("Corré con sudo (toca /srv/config y docker).")
+        sys.exit(1)
+    if not sh.have("docker"):
+        ui.print_fatal("Falta docker.")
+        sys.exit(1)
+
+
+def main() -> int:
+    check_prereqs()
+    ui.init_log(REPO_ROOT / "configure-stack.log", TOTAL_STEPS)
+
+    cfg = config.Config(REPO_ROOT)
+
+    vps = host.Host(cfg)
+    radarr = servarr.Radarr(cfg)
+    sonarr = servarr.Sonarr(cfg)
+    prowlarr = servarr.Prowlarr(cfg)
+    sabnzbd = sab.Sabnzbd(cfg)
+    edge = proxy.Proxy(cfg, REPO_ROOT)
+
+    radarr_category = cfg.get("radarr", "downloadClientCategory")
+    sonarr_category = cfg.get("sonarr", "downloadClientCategory")
+    radarr_root = config.require_container_path(
+        cfg.get("radarr", "rootFolder"), "radarr.rootFolder"
+    )
+    sonarr_root = config.require_container_path(
+        cfg.get("sonarr", "rootFolder"), "sonarr.rootFolder"
+    )
+
+    # -- 1 ----------------------------------------------------------------
+    ui.step("Preparando el host (Tailscale + firewall)")
+    # VA PRIMERO porque produce la IP del tailnet, que el compose necesita para
+    # bindear los paneles y que los pasos siguientes usan para pegarle a las
+    # APIs. Si Tailscale no esta autenticado, aborta aca con las instrucciones.
+    vps.setup(SYS_SCRIPTS)
+
+    # -- 2 ----------------------------------------------------------------
+    ui.step("Preparando el arbol de carpetas en el host")
+    # Los root folders salen de la config, asi que se agregan a la lista en vez
+    # de asumir cuales son: si los cambias en el conf, la carpeta se crea igual.
+    dirs = [
+        config.MEDIA_HOST_DIR,
+        f"{config.MEDIA_HOST_DIR}/downloads",
+        config.ctr_to_host_path(radarr_root),
+        config.ctr_to_host_path(sonarr_root),
+        config.ctr_to_host_path(sabnzbd.complete_dir),
+        config.ctr_to_host_path(sabnzbd.incomplete_dir),
+        config.CONFIG_HOST_DIR,
+    ]
+    sh.run_script(
+        SYS_SCRIPTS / "media-tree.sh",
+        config.MEDIA_HOST_DIR, config.PUID, config.PGID,
+        *dict.fromkeys(dirs),   # dedup preservando el orden
+    )
+
+    # -- 3 ----------------------------------------------------------------
+    ui.step("Preparando el borde (nginx + fail2ban)")
+    # VA ANTES del compose up: los contenedores montan /srv/config, asi que si
+    # la config no esta puesta cuando arrancan, nginx levanta con el sitio de
+    # ejemplo de la imagen en vez del reverse proxy de Jellyfin.
+    edge_changed = edge.install_configs(SYS_SCRIPTS)
+    if edge.geo_enabled:
+        edge.sync_geoip_db(SYS_SCRIPTS)
+
+    # -- 4 ----------------------------------------------------------------
+    ui.step("Levantando el stack")
+    sh.run_script(SYS_SCRIPTS / "compose-up.sh", REPO_ROOT, *edge.compose_profiles)
+    if edge_changed:
+        # Solo para los que ya estaban corriendo: al resto los acaba de crear
+        # el compose con la config nueva.
+        edge.reload()
+
+    # -- 5 ----------------------------------------------------------------
+    ui.step(f"Configurando bypass de auth de qBittorrent (red {config.MEDIA_SUBNET})")
+    sh.run_script(
+        SYS_SCRIPTS / "qbit-bypass.sh",
+        config.QBIT_CONTAINER, config.QBIT_CONF, config.MEDIA_SUBNET,
+    )
+
+    # -- 6 ----------------------------------------------------------------
+    ui.step("Configurando Radarr (peliculas)")
+    radarr.apply_external_auth(SYS_SCRIPTS)
+    radarr.wait_ready()
+    ui.detail(f"Categoria   : {radarr_category}")
+    ui.detail(f"Root folder : {radarr_root}")
+    radarr.upsert_download_client(
+        config.TC_NAME, radarr.qbittorrent_payload(radarr_category)
+    )
+    sh.run_script(
+        SYS_SCRIPTS / "ensure-dir.sh",
+        config.ctr_to_host_path(radarr_root), config.PUID, config.PGID,
+        radarr.container, radarr_root,
+    )
+    radarr.add_root_folder(radarr_root)
+
+    # La carpeta de descargas tiene el mismo problema de dueño, pero se
+    # manifiesta mas tarde y peor: el root folder se agrega bien y recien falla
+    # al importar ("Couldn't import" en Activity -> Queue). Radarr necesita
+    # escribir ahi para hacer el hardlink de downloads/ -> movies/.
+    sh.run_script(
+        SYS_SCRIPTS / "ensure-dir.sh",
+        f"{config.MEDIA_HOST_DIR}/downloads", config.PUID, config.PGID,
+        radarr.container, f"{config.MEDIA_CTR_DIR}/downloads",
+    )
+
+    # -- 7 ----------------------------------------------------------------
+    ui.step("Configurando Sonarr (series)")
+    sonarr.apply_external_auth(SYS_SCRIPTS)
+    sonarr.wait_ready()
+    ui.detail(f"Categoria   : {sonarr_category}")
+    ui.detail(f"Root folder : {sonarr_root}")
+    sonarr.upsert_download_client(
+        config.TC_NAME, sonarr.qbittorrent_payload(sonarr_category)
+    )
+    sh.run_script(
+        SYS_SCRIPTS / "ensure-dir.sh",
+        config.ctr_to_host_path(sonarr_root), config.PUID, config.PGID,
+        sonarr.container, sonarr_root,
+    )
+    sonarr.add_root_folder(sonarr_root)
+
+    # -- 8 ----------------------------------------------------------------
+    ui.step("Configurando SABnzbd (usenet)")
+    # Va DESPUES de Radarr y Sonarr porque se conecta a los dos.
+    # Antes de wait_ready: reinicia el contenedor.
+    sabnzbd.configure_access(SYS_SCRIPTS)
+    sabnzbd.wait_ready()
+    for ctr_path in (sabnzbd.complete_dir, sabnzbd.incomplete_dir):
+        sh.run_script(
+            SYS_SCRIPTS / "ensure-dir.sh",
+            config.ctr_to_host_path(ctr_path), config.PUID, config.PGID,
+            sab.SAB_CONTAINER, ctr_path,
+        )
+    sabnzbd.configure_dirs()
+    sabnzbd.configure_categories([radarr_category, sonarr_category])
+    # El proveedor es lo unico sin lo cual SABnzbd no descarga nada, aunque
+    # todo lo demas quede perfecto.
+    sabnzbd.configure_server()
+    radarr.upsert_download_client(
+        sab.SAB_NAME, sabnzbd.client_payload(radarr.category_field, radarr_category)
+    )
+    sonarr.upsert_download_client(
+        sab.SAB_NAME, sabnzbd.client_payload(sonarr.category_field, sonarr_category)
+    )
+
+    # -- 9 ----------------------------------------------------------------
+    ui.step("Configurando Prowlarr (indexers)")
+    # Va ULTIMO a proposito: se conecta hacia Radarr y Sonarr y necesita las
+    # API keys de los dos, asi que ambos tienen que existir y responder antes.
+    prowlarr.apply_external_auth(SYS_SCRIPTS)
+    prowlarr.wait_ready()
+    prowlarr.add_flaresolverr()
+
+    # Los indexers salen del conf: agregar otro es editar services_setup.conf,
+    # no tocar codigo. La API key de cada uno vive en el .env (el conf se
+    # commitea, el .env no).
+    for indexer in cfg.get("prowlarr", "indexers", default=[], required=False):
+        prowlarr.add_indexer(
+            indexer["name"],
+            indexer["url"],
+            cfg.env(indexer["apiKeyEnv"]),
+        )
+
+    # Las apps van DESPUES de los indexers: al conectarlas con syncLevel
+    # fullSync, Prowlarr les empuja de una lo que ya tiene cargado.
+    prowlarr.connect_app(radarr)
+    prowlarr.connect_app(sonarr)
+
+    # -- 10 ---------------------------------------------------------------
+    ui.step("Listo")
+    ui.detail(f"Peliculas : {radarr_root}")
+    ui.detail(f"Series    : {sonarr_root}")
+    ui.detail("Descargas : torrent via qBittorrent + usenet via SABnzbd")
+    print()
+    # Los puertos salen de los objetos y no de strings sueltos: si cambia el
+    # de una clase, este resumen no queda mintiendo.
+    ui.detail(f"Paneles (por Tailscale, http://{cfg.tailscale_ip}:PUERTO):")
+    ui.detail(f"  {radarr.port} Radarr    {sonarr.port} Sonarr    {prowlarr.port} Prowlarr")
+    ui.detail(f"  {config.TC_PORT} qBittorrent    {sabnzbd.port} SABnzbd")
+    ui.detail("  6767 Bazarr    5055 Jellyseerr    8265 Tdarr    8096 Jellyfin")
+    print()
+    geo = (f"solo {', '.join(edge.countries)}" if edge.geo_enabled else "DESACTIVADO")
+    ui.detail(f"Internet : Jellyfin en http://<IP-VPS>/ via nginx (geo: {geo})")
+    print()
+    ui.warn("Si agregas indexers con Cloudflare, poneles el tag "
+            f"'{prowlarr.FLARESOLVERR_TAG}' en Prowlarr.")
+    ui.warn("En Jellyfin -> Dashboard -> Networking, agrega "
+            f"{config.MEDIA_SUBNET} como known proxy: sin eso ve la IP de "
+            "nginx en vez de la del cliente y fail2ban banea al proxy.")
+    print()
+    # Lo unico que el script no puede verificar solo: hace falta salir a
+    # internet desde afuera de la VPS para saber que quedo abierto de verdad.
+    ui.detail("Chequeos que quedan para vos, desde el celu con DATOS MOVILES:")
+    ui.detail("  http://<IP-VPS>/       -> entra Jellyfin"
+              + ("  (403 si estas fuera de los paises permitidos)"
+                 if edge.geo_enabled else ""))
+    ui.detail("  http://<IP-VPS>:8096/  -> NO responde (Jellyfin directo)")
+    ui.detail(f"  http://<IP-VPS>:{prowlarr.port}/  -> NO responde (Prowlarr)")
+    ui.detail(f"  http://<IP-VPS>:{radarr.port}/  -> NO responde (Radarr)")
+    ui.detail("  Si alguno responde, revisá los binds a la IP de Tailscale en")
+    ui.detail("  el compose: es lo unico que los tapa, UFW no alcanza.")
+    ui.logfile("=== configure-stack finalizado OK ===")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ui.StackError as exc:
+        ui.print_fatal(str(exc))
+        ui.logfile(f"=== ABORTADO: {exc} ===")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        ui.print_fatal("Interrumpido.")
+        sys.exit(130)

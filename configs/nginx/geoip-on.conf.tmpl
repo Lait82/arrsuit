@@ -1,0 +1,20 @@
+# =========================================================================
+#  Geo-bloqueo ACTIVO - plantilla de 00-geoip.conf
+#
+#  La renderiza configure-stack.py cuando el .env tiene credenciales de
+#  MaxMind. {{COUNTRIES}} se reemplaza por una linea 'XX yes;' por cada pais
+#  de .nginx.geoBlock.countries (configs/services_setup.conf).
+#
+#  El .mmdb lo baja el contenedor geoipupdate al volumen 'geoip'. Si el
+#  archivo no existe, nginx NO arranca: la directiva geoip2 falla al parsear
+#  la config. Por eso configure-stack.py baja la base ANTES de levantar nginx.
+# =========================================================================
+
+geoip2 /geoip/GeoLite2-Country.mmdb {
+    $geoip2_country_code country iso_code;
+}
+
+map $geoip2_country_code $allowed_country {
+    default no;
+{{COUNTRIES}}
+}

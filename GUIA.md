@@ -1,20 +1,41 @@
 # Guía de puesta en marcha — media stack
 
-Todo asume que ya tenés Docker + Docker Compose en la VPS y Tailscale corriendo.
+Todo asume que ya tenés Docker + Docker Compose en la VPS.
 Los paneles NO se exponen a internet: se acceden por la IP de tu tailnet.
+
+**Casi todo vive en el compose**, incluidos el reverse proxy (nginx), el
+geo-bloqueo y fail2ban. Del host solo quedan afuera de Docker dos cosas, porque
+no pueden estar adentro: **Tailscale** (crea una interfaz de red del host) y
+**UFW** (son las reglas del host). Pero ya no se configuran aparte: son el
+**paso 1** del orquestador.
+
+Son dos comandos, y el segundo hace todo:
+
+```bash
+cp env.example .env && nano .env   # secretos
+sudo ./configure-stack.py          # host + compose + configuración de servicios
+```
+
+Es idempotente de punta a punta: se puede correr las veces que haga falta. Cada
+paso chequea antes de actuar, así que una segunda pasada no reinstala paquetes
+ni reconstruye el firewall.
+
+> **La primera vez frena en el paso 1** si Tailscale todavía no está
+> autenticado: eso abre una URL en el navegador y no se automatiza. Corré
+> `sudo tailscale up --ssh`, autenticá, y volvé a correr el mismo comando.
+
+> ⚠️ Antes de la primera corrida, revisá que `SSH_PORT` en el `.env` sea tu
+> puerto SSH real. El paso 1 configura UFW y abre **solo** ese puerto; si no
+> coincide, te quedás afuera del server.
 
 ---
 
 ## Paso 0 — Estructura de carpetas
 
-Creá las carpetas de datos antes de levantar nada:
-
-```bash
-sudo mkdir -p /srv/config
-sudo mkdir -p /srv/media/{downloads,movies,tv}
-# que tu usuario (PUID/PGID 1000) sea dueño:
-sudo chown -R 1000:1000 /srv
-```
+**Esto lo hace solo el orquestador** (paso 2, `media-tree.sh`): crea las carpetas
+con el dueño correcto y verifica desde adentro de cada contenedor que pueda
+escribir. Queda documentado acá para que entiendas el layout, no para que lo
+corras a mano.
 
 Estructura resultante:
 
@@ -24,11 +45,15 @@ Estructura resultante:
 └── media/
     ├── downloads/   # qBittorrent baja acá
     ├── movies/      # Radarr organiza acá  -> biblioteca "Películas" de Jellyfin
-    └── tv/          # Sonarr organiza acá  -> biblioteca "Series" de Jellyfin
+    └── series/      # Sonarr organiza acá  -> biblioteca "Series" de Jellyfin
 ```
 
+Ojo: dentro de los contenedores esas rutas son `/data/movies` y `/data/series`.
+Los servicios no ven el filesystem del host, así que en cualquier config de
+Radarr, Sonarr o Jellyfin va la ruta `/data/...`, nunca `/srv/media/...`.
+
 **Importante (hardlinks):** todos los servicios montan `/srv/media` como `/data`.
-Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`tv/` con
+Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`series/` con
 **hardlink** (instantáneo, sin duplicar espacio) en vez de copiar. Si montaras
 `/downloads` y `/movies` por separado, perderías el hardlink y duplicarías disco.
 
@@ -46,7 +71,7 @@ Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`tv/` con
 5. Generá y abrí el archivo `.conf`. Copiá el valor de `PrivateKey`.
 6. En la carpeta del compose:
    ```bash
-   cp .env.example .env
+   cp env.example .env
    nano .env   # pegá la private key en WIREGUARD_PRIVATE_KEY
    ```
 
@@ -55,6 +80,9 @@ Esto permite que Radarr/Sonarr muevan de `downloads/` a `movies/`/`tv/` con
 ---
 
 ## Paso 2 — Levantar el stack
+
+**Esto también lo hace el orquestador** (paso 4). Lo de abajo sirve para
+levantarlo a mano si estás debuggeando:
 
 ```bash
 cd /ruta/al/media-stack
@@ -161,15 +189,46 @@ Desde cualquier dispositivo en tu tailnet, usá la IP Tailscale de la VPS
 | Bazarr      | 6767   |
 | Jellyseerr  | 5055   |
 | Tdarr       | 8265   |
+| Jellyfin    | 8096   |
 
 Ej: `http://100.x.x.x:7878` para Radarr.
 
-**Firewall:** asegurate de que la VPS NO tenga estos puertos abiertos al mundo.
-Con ufw, algo como:
+Lo único que sale a internet es el **puerto 80**, donde escucha nginx y proxea
+Jellyfin. El `8096` de la tabla es un atajo para vos por el tailnet (entrás al
+dashboard sin pasar por el geo-bloqueo); desde internet ese puerto no existe.
+
+**Firewall:** lo configura el paso 1 del orquestador (UFW: solo SSH, Tailscale
+y el 80). Pero el que realmente tapa los paneles **no es UFW**: son los binds a
+`${TAILSCALE_IP}` del compose. Docker publica los puertos escribiendo sus
+propias reglas de DNAT, que se evalúan **antes** que las cadenas de UFW, así que
+un servicio publicado en `0.0.0.0` quedaría expuesto aunque UFW diga `deny`.
+
+---
+
+## Paso 6.5 — Jellyfin detrás del proxy: `known proxies`
+
+**Esto no es opcional si querés que fail2ban sirva de algo.**
+
+Jellyfin loguea la IP de quien le pega, que ahora es el contenedor de nginx. Hay
+que decirle que confíe en el header `X-Forwarded-For`:
+
+> Jellyfin → Dashboard → Networking → **Known proxies**: `172.20.0.0/16`
+
+Sin eso, los logs muestran siempre la IP de nginx y fail2ban termina baneando al
+proxy en vez de al atacante.
+
+Para verificar el baneo, con 4 logins fallidos a propósito:
+
 ```bash
-sudo ufw allow in on tailscale0   # todo lo que entre por Tailscale, OK
-sudo ufw allow 22/tcp             # SSH (o cerralo también si entrás por Tailscale)
-sudo ufw enable
+docker exec fail2ban fail2ban-client status jellyfin
+```
+
+Y si no matchea nada, lo primero a revisar es el regex — cambia entre versiones
+de Jellyfin (detalle en [configs/README.md](configs/README.md)):
+
+```bash
+docker exec fail2ban fail2ban-regex \
+    /remotelogs/jellyfin/<archivo>.log /config/fail2ban/filter.d/jellyfin.conf
 ```
 
 ---
@@ -203,7 +262,21 @@ En Tdarr:
   ```bash
   docker compose pull && docker compose up -d
   ```
+- **Editar la config de nginx o fail2ban:** se toca en `configs/` y se vuelve a
+  correr `sudo ./configure-stack.py`, que las copia a `/srv/config` y recarga
+  los contenedores si cambiaron. No editar `/srv/config` a mano: la próxima
+  corrida lo pisa.
+- **Levantar el compose a mano** (sin el orquestador) deja afuera el contenedor
+  `geoipupdate`, que vive detrás del perfil `geo`:
+  ```bash
+  docker compose --profile geo up -d     # si tenés credenciales de MaxMind
+  ```
+  Está así a propósito: sin credenciales esa imagen sale con error y quedaría
+  reiniciándose para siempre.
 - **Downloads y biblioteca en el mismo filesystem:** no muevas `downloads/`
   fuera de `/srv/media` o perdés los hardlinks.
-- **Jellyfin:** apuntá sus bibliotecas a `/srv/media/movies` y `/srv/media/tv`
-  (ajustá el path según cómo tengas montado Jellyfin en su propio contenedor).
+- **Jellyfin:** apuntá sus bibliotecas a `/data/movies` y `/data/series`, que
+  son las rutas **dentro del contenedor**. El compose monta `/srv/media` como
+  `/data`, así que Jellyfin no ve las rutas del host. Si le ponés
+  `/srv/media/...` la biblioteca escanea cero archivos y no reporta ningún
+  error: simplemente no aparece nada.
