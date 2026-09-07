@@ -5,6 +5,16 @@
 #  Deja el firewall del host en el estado que el stack necesita:
 #  todo cerrado salvo SSH, Tailscale y el puerto 80 (nginx).
 #
+#  EL 443 VA EN 'reject' Y NO EN 'deny', que es la unica regla de este script
+#  que no es obvia. El stack sirve HTTP plano: en el 443 no hay nada. Pero los
+#  navegadores modernos (Brave, Chrome, Edge) prueban HTTPS ANTES que HTTP
+#  cuando escribis un host sin esquema, y 'deny' es DROP: el paquete se
+#  descarta sin contestar y el browser se queda esperando hasta que vence el
+#  timeout. Nunca llega a probar el 80, y el usuario ve ERR_TIMED_OUT en un
+#  sitio que funciona perfecto. Con 'reject' el kernel manda un RST, el intento
+#  de HTTPS muere en milisegundos y el browser cae a HTTP solo.
+#  No abre nada: rechazar es mas explicito que descartar.
+#
 #  POR QUE EL CHEQUEO DE IDEMPOTENCIA NO ES COSMETICO:
 #  aplicar las reglas implica 'ufw --force reset', que borra el firewall y lo
 #  reconstruye. En la primera corrida da igual, pero esto ahora corre en cada
@@ -43,6 +53,7 @@ else
         ["^${SSH_PORT}/tcp .*ALLOW"]="SSH en el puerto ${SSH_PORT}"
         ["^41641/udp .*ALLOW"]="Tailscale (41641/udp)"
         ["^80/tcp .*ALLOW"]="nginx (80/tcp)"
+        ["^443/tcp .*REJECT"]="rechazo explicito del 443 (fallback a HTTP)"
     )
     for pattern in "${!wanted[@]}"; do
         if ! grep -qE "$pattern" <<<"$status"; then
@@ -72,5 +83,6 @@ ufw allow in on tailscale0 comment 'Tailscale interface'
 ufw allow "$SSH_PORT"/tcp   comment 'SSH'
 ufw allow 41641/udp         comment 'Tailscale'
 ufw allow 80/tcp            comment 'Jellyfin via nginx'
+ufw reject 443/tcp          comment 'sin TLS: RST para que el browser caiga a HTTP'
 ufw --force enable
-info "Firewall aplicado: SSH ($SSH_PORT), Tailscale y 80/tcp."
+info "Firewall aplicado: SSH ($SSH_PORT), Tailscale, 80/tcp y 443/tcp rechazado."

@@ -245,6 +245,12 @@ def main() -> int:
     else:
         media_server.wait_ready()
 
+        # El asistente inicial va PRIMERO: hasta que no corre, Jellyfin no
+        # tiene usuario admin, y sin admin no hay login ni API key posible.
+        # Es la unica ventana donde /Startup/* deja crear al primer usuario
+        # sin autenticar.
+        media_server.complete_wizard()
+
         # Login -> crear/reusar la key -> escribirla en el .env. A partir de la
         # segunda corrida entra por la key y ni se autentica.
         media_server.ensure_api_key()

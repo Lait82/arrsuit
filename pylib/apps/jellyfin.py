@@ -55,6 +55,22 @@ class Jellyfin:
             if secret:
                 ui.add_secret(secret)
 
+        # Solo se usan la primera vez, cuando corre el asistente. Despues el
+        # dueño de estos valores es Jellyfin: cambiarlos aca no los reescribe.
+        self.server_name = cfg.get(
+            "jellyfin", "setup", "serverName", default="JellyfinServer", required=False
+        )
+        self.ui_culture = cfg.get(
+            "jellyfin", "setup", "uiCulture", default="en-US", required=False
+        )
+        self.metadata_country = cfg.get(
+            "jellyfin", "setup", "metadataCountryCode", default="US", required=False
+        )
+        self.metadata_language = cfg.get(
+            "jellyfin", "setup", "preferredMetadataLanguage", default="en",
+            required=False,
+        )
+
         self.delete_segments = cfg.get(
             "jellyfin", "transcoding", "deleteSegments", default=True, required=False
         )
@@ -116,6 +132,75 @@ class Jellyfin:
                 f"Jellyfin no respondio en {self.url} despues de "
                 f"{attempts * delay}s. Mira 'docker logs jellyfin'."
             )
+
+    # -- Asistente inicial ------------------------------------------------
+    def _startup(self, method: str, path: str, data=None) -> api.Response:
+        """Llamada a /Startup/*: va SIN token.
+
+        Mientras el asistente no termino, esos endpoints corren con la policy
+        FirstTimeSetupOrElevated, que los deja pasar sin autenticar. Es la unica
+        ventana para crear el primer usuario, porque todavia no hay con que
+        loguearse. Apenas se llama a /Startup/Complete, pasan a pedir admin.
+        """
+        return api.request(method, f"{self.url}{path}", data=data)
+
+    @property
+    def wizard_pending(self) -> bool:
+        resp = api.request("GET", f"{self.url}/System/Info/Public")
+        if not resp.ok:
+            ui.die(f"Jellyfin no contesta /System/Info/Public (HTTP {resp.status}).")
+        # El default es True para no intentar el wizard sobre un servidor que no
+        # sabemos leer: si el campo no viene, se asume configurado.
+        return not (resp.json() or {}).get("StartupWizardCompleted", True)
+
+    def complete_wizard(self) -> None:
+        """Corre el asistente inicial por API. Idempotente."""
+        if not self.wizard_pending:
+            ui.info("El asistente inicial ya estaba completo.")
+            return
+
+        if not (self.user and self.password):
+            ui.die(
+                "El asistente inicial de Jellyfin esta pendiente y necesito "
+                "JELLYFIN_USER y JELLYFIN_PASSWORD en el .env para crear el "
+                "usuario admin."
+            )
+
+        ui.info(f"Corriendo el asistente inicial (admin '{self.user}')...")
+        ui.detail(f"Servidor : {self.server_name}")
+        ui.detail(f"Idioma   : {self.ui_culture} / metadatos {self.metadata_language}"
+                  f" ({self.metadata_country})")
+
+        steps = (
+            ("POST", "/Startup/Configuration", {
+                "ServerName": self.server_name,
+                "UICulture": self.ui_culture,
+                "MetadataCountryCode": self.metadata_country,
+                "PreferredMetadataLanguage": self.metadata_language,
+            }),
+            # ESTE GET NO ES OPCIONAL, aunque no usemos la respuesta: es el que
+            # crea el usuario por defecto ('abc'). El POST de abajo RENOMBRA a
+            # ese usuario, no crea uno, asi que sin nadie a quien renombrar
+            # contesta 404. El wizard web hace la misma secuencia.
+            ("GET", "/Startup/User", None),
+            ("POST", "/Startup/User", {"Name": self.user, "Password": self.password}),
+            # Remote access ON: a Jellyfin se entra desde internet por nginx.
+            # El mapeo de puertos es UPnP contra el router, que en un VPS no
+            # existe: pedirlo solo agrega un error en el log de arranque.
+            ("POST", "/Startup/RemoteAccess", {
+                "EnableRemoteAccess": True,
+                "EnableAutomaticPortMapping": False,
+            }),
+            ("POST", "/Startup/Complete", None),
+        )
+        for method, path, payload in steps:
+            resp = self._startup(method, path, payload)
+            if not resp.ok:
+                ui.die(f"Fallo el asistente en {method} {path} (HTTP {resp.status}).")
+
+        if self.wizard_pending:
+            ui.die("Corri el asistente pero Jellyfin lo sigue marcando pendiente.")
+        ui.info("Asistente completado.")
 
     # -- API key ----------------------------------------------------------
     def ensure_api_key(self) -> None:
