@@ -12,20 +12,20 @@
 #  (el contenedor geoipupdate), que solo se levanta si hay credenciales de
 #  MaxMind: sin ellas la imagen sale con error y quedaria reiniciandose.
 #
-#  EL PULL VA APARTE del 'up -d' y con reintentos: es el unico tramo que sale
-#  a internet y el que se cae. Casi todas las imagenes del stack viven en
-#  ghcr.io (lscr.io es un alias suyo), y GitHub corta las conexiones cuando el
-#  compose le abre una decena de descargas en paralelo: el pull muere con
-#  'connection reset by peer' y se lleva puesto todo el paso. Reintentar
-#  alcanza porque las capas ya bajadas quedan en el cache local, asi que cada
-#  vuelta arranca donde quedo la anterior.
+#  EL PULL VA APARTE del 'up -d', DE A UNA IMAGEN y con reintentos. El pull es
+#  el unico tramo que sale a internet y el que se cae: las capas de casi todo
+#  el stack salen del CDN de GitHub (lscr.io es un alias de ghcr.io) y esa
+#  descarga muere con 'connection reset by peer'.
+#
+#  De a una y no todas juntas por como reacciona compose al fallo: cuando una
+#  descarga se corta, cancela las demas ('Interrupted') y se pierde lo que
+#  estaban bajando. Servicio por servicio, un corte se lleva puesta una sola
+#  imagen y el resto queda en el cache local. Con eso el reintento siempre
+#  avanza, y las capas a medio bajar tambien quedan cacheadas.
 # =========================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# Cuantos servicios toca compose a la vez. El default (todos juntos) es lo que
-# dispara el corte de GitHub. Se puede subir por entorno si la red aguanta.
-export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-3}"
 PULL_RETRIES=3
 
 REPO_ROOT="${1:?falta el repo_root}"; shift
@@ -41,17 +41,33 @@ if (( ${#PROFILE_ARGS[@]} > 0 )); then
     info "Perfiles activos: $*"
 fi
 
-info "Bajando las imagenes que falten..."
-for attempt in $(seq 1 "$PULL_RETRIES"); do
-    if $DC "${PROFILE_ARGS[@]}" pull; then
-        break
-    fi
-    (( attempt == PULL_RETRIES )) \
-        && die "No pude bajar las imagenes ($PULL_RETRIES intentos). Revisa la salida de arriba."
-    delay=$(( attempt * 10 ))
-    warn "Fallo el pull (intento $attempt/$PULL_RETRIES). Reintento en ${delay}s..."
-    sleep "$delay"
+# La lista sale del compose y no de una constante: un servicio nuevo entra solo.
+mapfile -t SERVICES < <($DC "${PROFILE_ARGS[@]}" config --services)
+(( ${#SERVICES[@]} > 0 )) || die "El compose no declara ningun servicio."
+
+info "Bajando las imagenes que falten (${#SERVICES[@]} servicios, de a uno)..."
+failed=()
+for svc in "${SERVICES[@]}"; do
+    for attempt in $(seq 1 "$PULL_RETRIES"); do
+        if $DC "${PROFILE_ARGS[@]}" pull "$svc"; then
+            break
+        fi
+        if (( attempt == PULL_RETRIES )); then
+            # No se aborta en la primera imagen que falla: se sigue con las
+            # demas para que la corrida deje bajado todo lo que se pueda.
+            warn "No pude bajar '$svc' ($PULL_RETRIES intentos)."
+            failed+=("$svc")
+            break
+        fi
+        delay=$(( attempt * 10 ))
+        warn "Fallo el pull de '$svc' (intento $attempt/$PULL_RETRIES). Reintento en ${delay}s..."
+        sleep "$delay"
+    done
 done
+
+if (( ${#failed[@]} > 0 )); then
+    die "Quedaron imagenes sin bajar: ${failed[*]}. Volve a correr esto: lo ya bajado no se repite."
+fi
 
 before="$($DC ps --status running --quiet 2>/dev/null | wc -l)"
 info "Sincronizando el stack con el compose ($before contenedores arriba)..."
