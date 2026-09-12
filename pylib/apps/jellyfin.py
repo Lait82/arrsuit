@@ -21,6 +21,7 @@ del transcode en su cache y por defecto los deja hasta terminar. Si el cliente
 corta a la mitad quedan huerfanos acumulandose.
 """
 
+import time
 from pathlib import Path
 
 from ..tools import api, config, ui
@@ -36,6 +37,10 @@ KEY_DELETE_SEGMENTS = "EnableSegmentDeletion"
 KEY_KEEP_SECONDS = "SegmentKeepSeconds"
 
 ENV_API_KEY = "JELLYFIN_API_KEY"
+
+# El plugin de Moonfin se llama 'Moonbase' en el catalogo: Moonfin es el
+# cliente, Moonbase es el companion del servidor.
+MOONBASE_PLUGIN = "Moonbase"
 
 
 class Jellyfin:
@@ -79,6 +84,11 @@ class Jellyfin:
             default=3600, required=False,
         )
 
+        self.libraries = cfg.get(
+            "jellyfin", "libraries", default=[], required=False
+        )
+        self.plugins = cfg.get("jellyfin", "plugins", default=[], required=False)
+
     @property
     def configured(self) -> bool:
         """Hay con que trabajar: o ya tenemos key, o podemos crearla."""
@@ -97,13 +107,20 @@ class Jellyfin:
 
     # -- HTTP -------------------------------------------------------------
     def call(self, method: str, path: str, data=None, token: str = "") -> api.Response:
-        # X-Emby-Token es el header de API key y sigue vigente. 'token' permite
-        # usar el AccessToken de sesion mientras todavia no hay API key.
+        """'token' permite usar el AccessToken de sesion mientras todavia no
+        hay API key; el resto del tiempo va la key.
+
+        EL TOKEN VA EN 'Authorization' Y NO EN 'X-Emby-Token': ese header era
+        un alias heredado de Emby y Jellyfin 12 lo saco. Con el, un servidor 12
+        contesta 401 a TODO aunque el token sea valido. El esquema
+        'MediaBrowser Token="..."' es el nativo y lo entienden las dos: 10.x lo
+        acepta desde siempre porque es el que usan sus propios clientes.
+        """
         auth = token or self.api_key
         return api.request(
             method,
             f"{self.url}{path}",
-            headers={"X-Emby-Token": auth},
+            headers={"Authorization": f'MediaBrowser Token="{auth}"'},
             data=data,
             secret=auth or None,
         )
@@ -120,10 +137,21 @@ class Jellyfin:
         no contestar, y ese arranque incluye crear y migrar su base SQLite y
         cargar los plugins. Con el minuto que le alcanza a los *arr, la primera
         corrida aborta un paso antes del final con el servidor sano.
+
+        NO ALCANZA CON QUE CONTESTE 200: mientras carga, Jellyfin 12 devuelve
+        por este mismo endpoint un JSON RECORTADO Y EN camelCase, sin el
+        StartupWizardCompleted que mira wizard_pending. Ese campo ausente cae
+        al default (asistente completo), asi que la corrida se saltea el
+        asistente y muere mas adelante en el login, echandole la culpa a las
+        credenciales del .env. Por eso se espera al campo y no al codigo HTTP.
         """
+        def ready() -> bool:
+            resp = api.request("GET", f"{self.url}/System/Info/Public")
+            return resp.ok and "StartupWizardCompleted" in (resp.json() or {})
+
         ok = ui.wait_for(
             "Esperando a que Jellyfin responda",
-            lambda: api.request("GET", f"{self.url}/System/Info/Public").ok,
+            ready,
             attempts,
             delay,
         )
@@ -343,3 +371,295 @@ class Jellyfin:
 
         estado = "activado" if self.delete_segments else "desactivado"
         ui.info(f"Borrado de segmentos {estado}, retencion {self.keep_seconds}s.")
+
+    # -- Bibliotecas ------------------------------------------------------
+    def create_libraries(self) -> None:
+        """Crea las bibliotecas del conf. Idempotente (por nombre).
+
+        EL ASISTENTE INICIAL NO CREA NINGUNA: termina con el servidor vacio, y
+        sin bibliotecas Jellyfin no muestra nada por mas que /data tenga todo.
+        Tampoco las descubre solo, aunque Radarr y Sonarr esten importando ahi.
+
+        Las rutas son las que ve JELLYFIN (/data/...), que es el mismo bind que
+        usan Radarr y Sonarr: por eso en el conf se escriben igual que los
+        rootFolder de ellos.
+        """
+        if not self.libraries:
+            ui.warn("No hay .jellyfin.libraries en el conf: no se crea ninguna.")
+            return
+
+        existing = self.call("GET", "/Library/VirtualFolders")
+        if not existing.ok:
+            ui.die(f"No pude listar las bibliotecas (HTTP {existing.status}).")
+        by_name = {item.get("Name") for item in (existing.json() or [])}
+
+        created = 0
+        for lib in self.libraries:
+            name, kind, path = lib["name"], lib["type"], lib["path"]
+            if name in by_name:
+                ui.warn(f"La biblioteca '{name}' ya existe. No se duplica.")
+                continue
+
+            ui.info(f"Creando la biblioteca '{name}' ({kind}) en {path}...")
+            # Solo se mandan PathInfos y el idioma: todo lo que no venga en
+            # LibraryOptions lo completa Jellyfin con sus defaults, que es lo
+            # que queremos (el monitor en tiempo real, por ejemplo).
+            resp = self.call(
+                "POST",
+                f"/Library/VirtualFolders?name={api.quote(name)}"
+                f"&collectionType={kind}&refreshLibrary=true",
+                {
+                    "LibraryOptions": {
+                        "PathInfos": [{"Path": path}],
+                        "PreferredMetadataLanguage": self.metadata_language,
+                        "MetadataCountryCode": self.metadata_country,
+                    }
+                },
+            )
+            if not resp.ok:
+                ui.warn(f"Fallo al crear '{name}' (HTTP {resp.status}):")
+                print(resp.errors())
+                ui.die(f"No se pudo crear la biblioteca '{name}'.")
+            created += 1
+
+        if created:
+            ui.info(f"{created} biblioteca(s) creada(s). El escaneo corre en background.")
+
+    # -- Plugins ----------------------------------------------------------
+    def install_plugins(self) -> bool:
+        """Instala los plugins del conf. Devuelve si hace falta reiniciar.
+
+        Cada plugin trae su repositorio: Jellyfin solo instala desde un
+        manifest que tenga cargado, asi que primero se agrega el repo y despues
+        se pide el paquete por nombre.
+        """
+        if not self.plugins:
+            return False
+
+        installed = self.call("GET", "/Plugins")
+        if not installed.ok:
+            ui.die(f"No pude listar los plugins (HTTP {installed.status}).")
+        have = {item.get("Name") for item in (installed.json() or [])}
+
+        # Tambien cuenta lo que ya esta en disco: un plugin que quedo bajado
+        # pero todavia no cargo (porque el reinicio no llego a pasar) no figura
+        # en /Plugins, y sin esto la corrida siguiente lo volveria a bajar.
+        have |= {
+            d.name.rsplit("_", 1)[0]
+            for d in self.plugins_dir.glob("*_*")
+            if d.joinpath("meta.json").is_file()
+        }
+
+        pending = [p for p in self.plugins if p["name"] not in have]
+        for plugin in self.plugins:
+            if plugin["name"] in have:
+                ui.warn(f"El plugin '{plugin['name']}' ya esta instalado. No se toca.")
+        if not pending:
+            return False
+
+        for plugin in pending:
+            self._add_repository(plugin["repositoryName"], plugin["repository"])
+
+        restart_needed = False
+        for plugin in pending:
+            name = plugin["name"]
+            ui.info(f"Instalando el plugin '{name}'...")
+            resp = self.call("POST", f"/Packages/Installed/{api.quote(name)}")
+            if not resp.ok:
+                ui.warn(f"Fallo la instalacion de '{name}' (HTTP {resp.status}):")
+                print(resp.errors())
+                if resp.status == 404:
+                    ui.warn(f"404 = Jellyfin no encuentra '{name}' en el catalogo. "
+                            "Revisá el nombre y la URL del repo en el conf.")
+                ui.die(f"No se pudo instalar el plugin '{name}'.")
+            restart_needed = True
+
+        # La descarga y el descomprimido son asincronicos: el POST contesta 204
+        # apenas encola el trabajo. Sin esta espera, el reinicio de abajo puede
+        # agarrar la instalacion a mitad de camino.
+        for plugin in pending:
+            self._wait_plugin(plugin["name"])
+
+        return restart_needed
+
+    def _add_repository(self, name: str, url: str) -> None:
+        """Agrega un repositorio de plugins. Idempotente (por URL).
+
+        OJO: el POST REEMPLAZA la lista entera, no agrega. Mandar solo el repo
+        nuevo deja a Jellyfin sin el catalogo oficial, que es de donde sale
+        todo lo demas. Por eso se lee la lista actual y se manda completa.
+        """
+        current = self.call("GET", "/Repositories")
+        if not current.ok:
+            ui.die(f"No pude listar los repositorios (HTTP {current.status}).")
+
+        repos = current.json() or []
+        if any(repo.get("Url") == url for repo in repos):
+            return
+
+        ui.info(f"Agregando el repositorio de plugins '{name}'...")
+        repos.append({"Name": name, "Url": url, "Enabled": True})
+        saved = self.call("POST", "/Repositories", repos)
+        if not saved.ok:
+            ui.warn(f"Fallo al agregar el repositorio (HTTP {saved.status}):")
+            print(saved.errors())
+            ui.die(f"No se pudo agregar el repositorio '{name}'.")
+
+    @property
+    def plugins_dir(self) -> Path:
+        """Donde Jellyfin desempaqueta los plugins, visto desde el HOST.
+
+        El compose monta /srv/config/jellyfin como /config, y adentro los
+        plugins cuelgan de /config/data/plugins/<Nombre>_<Version>/.
+        """
+        return Path(f"{config.CONFIG_HOST_DIR}/{self.container}/data/plugins")
+
+    def _wait_plugin(self, name: str, attempts: int = 30, delay: int = 2) -> None:
+        """Espera a que la instalacion termine de bajar y desempaquetar.
+
+        SE MIRA EL DISCO Y NO /Plugins, que seria lo natural: un plugin recien
+        instalado aparece ahi SOLO SI el servidor pudo cargarlo en caliente. Si
+        no (le pasa a Moonbase, cuyo targetAbi es de una version anterior),
+        queda instalado y perfectamente funcional pero invisible en esa lista
+        hasta despues del reinicio, y esperarlo ahi daba un timeout sobre algo
+        que ya habia salido bien.
+
+        El marcador es el meta.json que Jellyfin escribe al FINAL: el directorio
+        solo aparece antes, mientras todavia se esta desempaquetando, y
+        reiniciar en ese momento parte la instalacion al medio.
+        """
+        def unpacked() -> bool:
+            return any(
+                d.joinpath("meta.json").is_file()
+                for d in self.plugins_dir.glob(f"{name}_*")
+            )
+
+        if not ui.wait_for(f"Esperando a que baje el plugin '{name}'", unpacked,
+                           attempts, delay):
+            ui.die(
+                f"El plugin '{name}' no aparecio en {self.plugins_dir} despues "
+                f"de {attempts * delay}s. Mira 'docker logs {self.container}'."
+            )
+
+    def restart(self) -> None:
+        """Reinicia Jellyfin y espera a que vuelva.
+
+        Los plugins recien instalados quedan en estado 'Restart' y no cargan
+        hasta que pasa esto.
+
+        Reinicia el PROCESO, no el contenedor: en la imagen de LinuxServer lo
+        levanta s6 de nuevo en el lugar, asi que el contenedor sigue arriba y
+        no hace falta meterse con docker.
+        """
+        ui.info("Reiniciando Jellyfin para que carguen los plugins...")
+        resp = self.call("POST", "/System/Restart")
+        if not resp.ok:
+            ui.warn(f"Fallo el reinicio (HTTP {resp.status}). Reinicialo a mano:")
+            ui.warn(f"  docker restart {self.container}")
+            return
+
+        # El servidor tarda un instante en soltar el puerto: sin esta pausa, el
+        # primer chequeo lo encuentra todavia vivo y da por hecho que ya volvio.
+        time.sleep(5)
+        self.wait_ready()
+
+    # -- Moonbase (el plugin de Moonfin) ----------------------------------
+    def _plugin_id(self, name: str) -> str:
+        """Id del plugin instalado, o '' si no esta. Se pregunta en vez de
+        hardcodear el GUID: si el plugin no esta, no hay nada que configurar."""
+        resp = self.call("GET", "/Plugins")
+        if not resp.ok:
+            ui.die(f"No pude listar los plugins (HTTP {resp.status}).")
+        for item in resp.json() or []:
+            if item.get("Name") == name:
+                return item.get("Id", "")
+        return ""
+
+    def configure_moonbase_seerr(self, seerr) -> None:
+        """Prende el proxy de Seerr de Moonbase. Idempotente.
+
+        ES LO QUE PERMITE PEDIR CONTENIDO SIN EXPONER SEERR: Moonbase proxea
+        Seerr por adentro de Jellyfin (con single sign-on), y a Jellyfin ya se
+        entra desde internet via nginx. Sin esto habria que abrirle un puerto
+        propio a Seerr.
+
+        Las dos URLs son INTERNAS de la red 'media' porque las dos son
+        conversaciones entre contenedores: Jellyfin le pega a Seerr, y Seerr le
+        pega de vuelta al webhook de Jellyfin. Ninguna la abre un navegador.
+        """
+        # Sacarlo del conf es una decision, no un error: si no lo pediste, no
+        # hay nada que avisar.
+        if not any(p["name"] == MOONBASE_PLUGIN for p in self.plugins):
+            return
+
+        plugin_id = self._plugin_id(MOONBASE_PLUGIN)
+        if not plugin_id:
+            ui.warn(f"'{MOONBASE_PLUGIN}' esta en el conf pero no aparece "
+                    "instalado: no hay integracion de Seerr que prender.")
+            return
+
+        path = f"/Plugins/{plugin_id}/Configuration"
+        resp = self.call("GET", path)
+        if not resp.ok:
+            ui.die(f"No pude leer la config de {MOONBASE_PLUGIN} "
+                   f"(HTTP {resp.status}).")
+        current = resp.json() or {}
+
+        wanted = {
+            "SeerrEnabled": True,
+            "SeerrUrl": seerr.internal_url,
+            # Solo se usa para armar la URL del webhook que Seerr llama de
+            # vuelta. Si se deja vacio, Moonbase la adivina: prueba la URL
+            # publicada de Jellyfin, despues una IP de LAN y al final
+            # loopback, que desde el contenedor de Seerr no resuelve a nada.
+            "PublicServerUrl": self.internal_url,
+        }
+
+        if all(current.get(key) == value for key, value in wanted.items()):
+            ui.info(f"La integracion de Seerr en {MOONBASE_PLUGIN} ya esta "
+                    "como queremos. No se toca.")
+            return
+
+        # Se manda la config ENTERA y no solo las claves nuestras: el endpoint
+        # deserializa el body en el objeto de configuracion, asi que todo lo
+        # que no venga vuelve a su default y se perderia el resto de los
+        # ajustes del plugin (incluido el secreto del webhook, que Moonbase
+        # genera solo la primera vez).
+        current.update(wanted)
+        saved = self.call("POST", path, current)
+        if not saved.ok:
+            ui.warn(f"Fallo al guardar la config de {MOONBASE_PLUGIN} "
+                    f"(HTTP {saved.status}):")
+            print(saved.errors())
+            ui.die(f"No pude prender la integracion de Seerr en {MOONBASE_PLUGIN}.")
+
+        ui.info(f"Integracion de Seerr prendida en {MOONBASE_PLUGIN}.")
+        ui.detail(f"Seerr    : {seerr.internal_url}")
+        ui.detail(f"Webhook  : {self.internal_url}")
+        ui.warn("El webhook de Seerr lo registra Moonbase recien cuando entras "
+                "a Seerr desde Moonfin: necesita una sesion de admin.")
+
+    def report_plugins(self) -> None:
+        """Muestra en que estado quedo cada plugin.
+
+        VALE LA PENA MIRARLO: Jellyfin instala un plugin aunque su targetAbi
+        sea de una version anterior a la del servidor, y el problema recien
+        aparece al cargarlo. 'Active' es el unico estado que significa que
+        anduvo; 'Malfunctioned' o 'NotSupported' es que quedo instalado y
+        muerto.
+        """
+        resp = self.call("GET", "/Plugins")
+        if not resp.ok:
+            ui.warn(f"No pude listar los plugins (HTTP {resp.status}).")
+            return
+
+        wanted = {p["name"] for p in self.plugins}
+        for item in resp.json() or []:
+            if item.get("Name") not in wanted:
+                continue
+            status = item.get("Status", "?")
+            line = f"{item.get('Name')} {item.get('Version', '')} -> {status}"
+            if status == "Active":
+                ui.detail(f"  {line}")
+            else:
+                ui.warn(f"  {line}  (se esperaba 'Active')")

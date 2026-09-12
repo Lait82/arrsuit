@@ -1,7 +1,7 @@
 # =========================================================================
 #  Media stack para VPS (CPU-only) - Manu
 #  Gluetun (ProtonVPN/WireGuard) -> qBittorrent   |   SABnzbd (usenet, directo)
-#  Prowlarr, Radarr, Sonarr, Bazarr, Jellyseerr, Tdarr, Recyclarr, FlareSolverr
+#  Prowlarr, Radarr, Sonarr, Bazarr, Seerr, Tdarr, Recyclarr, FlareSolverr
 #  nginx -> unico servicio expuesto a internet (:80), proxea Jellyfin
 #  fail2ban + geoipupdate -> capa de defensa del borde
 #
@@ -291,18 +291,35 @@ services:
     restart: unless-stopped
 
   # -----------------------------------------------------------------------
-  # Jellyseerr - front de requests (para Jellyfin)
+  # Seerr - front de requests (el ex Jellyseerr)
+  #
+  # NO LLEVA PUID/PGID, a diferencia de casi todo el resto: la imagen ya corre
+  # como el usuario 'node', que es uid 1000. Pero tampoco chownea su /config al
+  # arrancar (eso lo hacen solo las imagenes de LinuxServer), asi que la carpeta
+  # tiene que llegarle con el dueño puesto: de eso se encarga ensure-dir.sh.
+  #
+  # init: true -> Seerr es un proceso Node que spawnea hijos; sin un init como
+  # PID 1 los que terminan quedan zombies. Lo pide la doc de la imagen.
   # -----------------------------------------------------------------------
-  jellyseerr:
-    image: fallenbagel/jellyseerr:latest
-    container_name: jellyseerr
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    init: true
     networks: [media]
     ports:
       - "${TAILSCALE_IP}:5055:5055"   # solo Tailscale
     environment:
       - TZ=America/Argentina/Buenos_Aires
+      - PORT=5055
     volumes:
-      - /srv/config/jellyseerr:/app/config
+      - /srv/config/seerr:/app/config
+    healthcheck:
+      # El mismo endpoint publico que usa el orquestador para esperarlo.
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
     restart: unless-stopped
 
   # -----------------------------------------------------------------------

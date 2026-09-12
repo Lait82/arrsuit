@@ -27,7 +27,7 @@ La decisión de diseño detrás de todo esto:
 - **Jellyfin** es el **único** servicio expuesto a internet, porque la tele
   (Samsung Tizen) no puede entrar por Tailscale. Y sale siempre **a través de
   nginx**: su propio puerto solo escucha en la IP de Tailscale.
-- **Todo lo demás** (Prowlarr, Radarr, Sonarr, Bazarr, Jellyseerr, Tdarr,
+- **Todo lo demás** (Prowlarr, Radarr, Sonarr, Bazarr, Seerr, Tdarr,
   qBittorrent) queda **solo accesible por Tailscale**. Son los paneles que, si se
   filtran, comprometen el server; no tienen por qué salir a internet.
 - El objetivo NO es defenderse de un atacante en la misma red ni de un 0-day de

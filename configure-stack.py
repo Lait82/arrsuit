@@ -40,7 +40,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from pylib.apps import host, jellyfin, proxy, recyclarr, sab, servarr
+from pylib.apps import host, jellyfin, proxy, recyclarr, sab, seerr, servarr
 from pylib.tools import sh, ui
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from pylib.tools import config  # noqa: E402
 
 SYS_SCRIPTS = REPO_ROOT / "scripts" / "sys"
-TOTAL_STEPS = 12
+TOTAL_STEPS = 13
 
 
 def check_prereqs() -> None:
@@ -75,6 +75,7 @@ def main() -> int:
     edge = proxy.Proxy(cfg, REPO_ROOT)
     quality = recyclarr.Recyclarr(cfg, REPO_ROOT)
     media_server = jellyfin.Jellyfin(cfg)
+    request_front = seerr.Seerr(cfg)
 
     radarr_category = cfg.get("radarr", "downloadClientCategory")
     sonarr_category = cfg.get("sonarr", "downloadClientCategory")
@@ -104,6 +105,12 @@ def main() -> int:
         config.ctr_to_host_path(sabnzbd.complete_dir),
         config.ctr_to_host_path(sabnzbd.incomplete_dir),
         config.CONFIG_HOST_DIR,
+        # La de Seerr va explicita porque es la unica que TIENE que existir con
+        # el dueño puesto antes del compose up: la imagen corre como uid 1000 y
+        # no chownea su /config, asi que si Docker la crea de root (que es lo
+        # que hace con el destino de un bind que no existe) el contenedor muere
+        # con EACCES y queda reiniciandose.
+        f"{config.CONFIG_HOST_DIR}/{request_front.container}",
     ]
     sh.run_script(
         SYS_SCRIPTS / "media-tree.sh",
@@ -234,7 +241,7 @@ def main() -> int:
     quality.sync(SYS_SCRIPTS)
 
     # -- 11 ---------------------------------------------------------------
-    ui.step("Configurando Jellyfin (transcode + avisos de biblioteca)")
+    ui.step("Configurando Jellyfin (bibliotecas, plugins y avisos)")
     # Todo esto necesita una API key, y crear una requiere estar autenticado.
     # Sin credenciales el paso se saltea entero en vez de abortar: el resto del
     # stack funciona igual.
@@ -255,6 +262,11 @@ def main() -> int:
         # segunda corrida entra por la key y ni se autentica.
         media_server.ensure_api_key()
 
+        # Las bibliotecas NO las crea el asistente: sin esto Jellyfin queda
+        # vacio por mas que Radarr y Sonarr esten importando en /data. Va antes
+        # que Seerr (paso 12), que sincroniza justamente estas bibliotecas.
+        media_server.create_libraries()
+
         # Borrado de segmentos HLS: sin esto los .ts de un transcode que el
         # cliente corto a la mitad quedan huerfanos y se van acumulando.
         media_server.configure_transcoding()
@@ -267,7 +279,65 @@ def main() -> int:
         for app in (radarr, sonarr):
             app.upsert_jellyfin_notification(media_server.name, media_server)
 
+        # Los plugins van AL FINAL del paso: reinician Jellyfin, y todo lo de
+        # arriba necesita el servidor arriba. Un plugin recien instalado queda
+        # inerte hasta ese reinicio.
+        if media_server.install_plugins():
+            media_server.restart()
+        media_server.report_plugins()
+
     # -- 12 ---------------------------------------------------------------
+    ui.step("Configurando Seerr (pedidos de contenido)")
+    if not media_server.configured:
+        ui.warn("Sin credenciales de Jellyfin: se saltea.")
+    else:
+        request_front.wait_ready()
+        ui.detail(f"Version: {request_front.version}")
+
+        # La carpeta ya la dejo lista el paso 2; esto solo confirma, desde
+        # ADENTRO del contenedor, que efectivamente puede escribir. Va despues
+        # del wait_ready y no antes porque usa 'docker exec': si el contenedor
+        # estuviera caido, daria un error del daemon en vez del mensaje util.
+        sh.run_script(
+            SYS_SCRIPTS / "ensure-dir.sh",
+            f"{config.CONFIG_HOST_DIR}/{request_front.container}",
+            config.PUID, config.PGID,
+            request_front.container, "/app/config",
+        )
+
+        # Crea el usuario admin Y enlaza Jellyfin de una. Es la unica llamada
+        # que se puede hacer sin API key, y la unica ventana para crear al
+        # primer usuario: la API key de Seerr resuelve al usuario 1, que hasta
+        # aca no existe.
+        request_front.link_jellyfin(media_server)
+
+        # Sin librerias prendidas, Seerr no sabe que hay bajado y te deja pedir
+        # cosas que ya estan en la biblioteca.
+        request_front.enable_libraries()
+
+        # El quality profile es el que aplica Recyclarr: si Seerr pidiera con
+        # otro, los pedidos irian a un perfil que nadie afina.
+        for app, root, profile_key in (
+            (radarr, radarr_root, "radarr"),
+            (sonarr, sonarr_root, "sonarr"),
+        ):
+            request_front.connect_servarr(
+                app, root,
+                cfg.get("recyclarr", profile_key, "qualityProfile", "name"),
+            )
+
+        # Hasta que no se cierra el asistente, la web redirige todo a /setup
+        # por mas que la config este completa.
+        request_front.finish_setup()
+
+        # El proxy de Seerr de Moonbase: es lo que deja pedir contenido desde
+        # la tele o el celular SIN exponer Seerr, porque se entra por Jellyfin.
+        # Va aca y no en el paso 11 por dos razones: Moonbase tiene que haber
+        # cargado (o sea, despues del reinicio de los plugins) y recien ahora
+        # Seerr esta configurado del otro lado.
+        media_server.configure_moonbase_seerr(request_front)
+
+    # -- 13 ---------------------------------------------------------------
     ui.step("Listo")
     ui.detail(f"Peliculas : {radarr_root}")
     ui.detail(f"Series    : {sonarr_root}")
@@ -278,7 +348,7 @@ def main() -> int:
     ui.detail(f"Paneles (por Tailscale, http://{cfg.tailscale_ip}:PUERTO):")
     ui.detail(f"  {radarr.port} Radarr    {sonarr.port} Sonarr    {prowlarr.port} Prowlarr")
     ui.detail(f"  {config.TC_PORT} qBittorrent    {sabnzbd.port} SABnzbd")
-    ui.detail("  6767 Bazarr    5055 Jellyseerr    8265 Tdarr    8096 Jellyfin")
+    ui.detail(f"  6767 Bazarr    {request_front.port} Seerr    8265 Tdarr    8096 Jellyfin")
     print()
     geo = (f"solo {', '.join(edge.countries)}" if edge.geo_enabled else "DESACTIVADO")
     ui.detail(f"Internet : Jellyfin en http://<IP-VPS>/ via nginx (geo: {geo})")

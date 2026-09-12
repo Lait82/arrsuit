@@ -99,6 +99,15 @@ def request(
     return result
 
 
+def quote(value: str) -> str:
+    """Escapa un valor para usarlo como query param.
+
+    safe="" para que tambien escape las barras: los nombres que viajan asi
+    (una biblioteca, un plugin) pueden tener cualquier cosa adentro.
+    """
+    return urllib.parse.quote(value, safe="")
+
+
 def build_url(base: str, path: str, params: dict[str, Any] | None = None) -> str:
     url = base.rstrip("/") + "/" + path.lstrip("/")
     if params:

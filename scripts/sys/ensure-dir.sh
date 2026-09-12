@@ -7,7 +7,7 @@
 #
 #  EL DUEÑO SE APLICA A TODO EL ARBOL, no solo a la carpeta de arriba: Docker
 #  crea los directorios de un bind como root cuando no existen todavia, y las
-#  imagenes que no son de LinuxServer (recyclarr, tdarr, jellyseerr) no
+#  imagenes que no son de LinuxServer (recyclarr, tdarr, seerr) no
 #  chownean su /config al arrancar. Con el chown a un solo nivel, un subdir
 #  que quedo de root pasa desapercibido hasta que la app falla al escribir.
 #

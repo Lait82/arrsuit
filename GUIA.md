@@ -147,8 +147,8 @@ Configurá en este orden (cada uno depende del anterior):
 5. **Bazarr** — conectá con Radarr (`http://radarr:7878`) y Sonarr
    (`http://sonarr:8989`). Agregá proveedores de subs (OpenSubtitles, Subdivx)
    y poné español como idioma deseado.
-6. **Jellyseerr** — conectá con Jellyfin y con Radarr/Sonarr. Es el front donde
-   pedís contenido.
+6. **Seerr** — el front donde pedís contenido. **Ya lo configura el orquestador**
+   (paso 12): lo enlaza con Jellyfin y con Radarr/Sonarr solo (ver Paso 6.7).
 
 > El detalle contraintuitivo: como qBittorrent comparte la pila de red de
 > gluetun, el resto de los servicios lo alcanzan como **`gluetun:8080`**, no
@@ -208,7 +208,7 @@ Desde cualquier dispositivo en tu tailnet, usá la IP Tailscale de la VPS
 | Radarr      | 7878   |
 | Sonarr      | 8989   |
 | Bazarr      | 6767   |
-| Jellyseerr  | 5055   |
+| Seerr       | 5055   |
 | Tdarr       | 8265   |
 | Jellyfin    | 8096   |
 
@@ -228,8 +228,10 @@ un servicio publicado en `0.0.0.0` quedaría expuesto aunque UFW diga `deny`.
 
 ## Paso 6.5 — Jellyfin: lo que configura el orquestador y lo que no
 
-El **paso 11** deja puestas dos cosas. Lo único que tenés que cargar en el
-`.env` son **`JELLYFIN_USER` y `JELLYFIN_PASSWORD`** (tu cuenta admin):
+El **paso 11** deja puestos el asistente inicial, las bibliotecas, los plugins,
+el borrado de segmentos y el aviso de Radarr/Sonarr al importar. Lo único que
+tenés que cargar en el `.env` son **`JELLYFIN_USER` y `JELLYFIN_PASSWORD`** (tu
+cuenta admin):
 
 ```bash
 JELLYFIN_USER=manu
@@ -252,6 +254,100 @@ aparece como **`arrsuit-orchestrator`**.
 
 Sin esas credenciales el paso se saltea con un aviso y el resto del stack
 funciona igual.
+
+### Las bibliotecas
+
+**El asistente inicial no crea ninguna**: termina con el servidor vacío, y
+Jellyfin tampoco las descubre solo por más que Radarr y Sonarr estén importando
+en `/data`. Las crea el paso 11 desde `.jellyfin.libraries`:
+
+```json
+"libraries": [
+    { "name": "Movies", "type": "movies",  "path": "/data/movies" },
+    { "name": "Series", "type": "tvshows", "path": "/data/series" }
+]
+```
+
+`path` es la ruta **que ve Jellyfin** (el mismo bind que usan Radarr y Sonarr),
+así que se escribe igual que los `rootFolder` de ellos. El `type` es el de
+Jellyfin: `movies`, `tvshows`, `music`, `boxsets`. Es idempotente por nombre:
+si ya existe, no la duplica ni la toca.
+
+> Van **antes** que Seerr (paso 12), que sincroniza justamente estas bibliotecas
+> para saber qué hay descargado.
+
+### Los plugins (Moonfin)
+
+El paso 11 los instala desde `.jellyfin.plugins`. Cada entrada trae su
+repositorio, porque Jellyfin solo instala desde un manifest que tenga cargado:
+
+```json
+"plugins": [
+    {
+        "name": "Moonbase",
+        "repositoryName": "Moonfin",
+        "repository": "https://raw.githubusercontent.com/Moonfin-Client/Plugin/refs/heads/master/manifest.json"
+    }
+]
+```
+
+> **El plugin se llama `Moonbase`, no `Moonfin`.** Moonfin es el cliente;
+> Moonbase es su plugin *companion* del lado del servidor. El `name` tiene que
+> ser **el del catálogo** (`Moonbase`), porque es lo que el script le pide a
+> Jellyfin: con el nombre del proyecto la instalación devuelve 404.
+
+Aparte del sync de ajustes y el theming, Moonbase hospeda la web de Moonfin en
+`/Moonfin/Web/` y trae un **proxy de Seerr con single sign-on**. Eso es lo que
+permite pedir contenido desde la tele o el celular **sin exponer Seerr**: entrás
+por Jellyfin, que ya sale a internet por nginx.
+
+### La integración con Seerr (la prende el paso 12)
+
+Viene apagada de fábrica (`SeerrEnabled: false`); el paso 12 la prende sola, con
+las dos URLs **internas** de la red `media` — las dos puntas son conversaciones
+entre contenedores, ninguna la abre un navegador:
+
+| Clave | Valor | Para qué |
+|-------|-------|----------|
+| `SeerrEnabled` | `true` | prende el proxy |
+| `SeerrUrl` | `http://seerr:5055` | Jellyfin le pega a Seerr |
+| `PublicServerUrl` | `http://jellyfin:8096` | Seerr le pega de vuelta al webhook |
+
+`PublicServerUrl` se pone explícito porque si se deja vacío Moonbase **adivina**:
+prueba la URL publicada de Jellyfin, después una IP de LAN, y al final loopback
+— que desde el contenedor de Seerr no resuelve a nada.
+
+La config del plugin se lee y se reescribe **entera**: ese endpoint deserializa
+el body en el objeto de configuración, así que mandar sólo nuestras claves
+volvería todo lo demás a su default (incluido el secreto del webhook, que
+Moonbase genera solo la primera vez).
+
+> **Queda un paso manual, y es por diseño:** el single sign-on guarda una sesión
+> de Seerr **por usuario**, así que cada uno entra una vez desde la app de
+> Moonfin. Hasta que eso pasa, `/Moonfin/Seerr/Status` dice
+> `authenticated: false`. El registro automático del webhook de Seerr también
+> espera a que haya una sesión de admin.
+
+Detalles que el script maneja y conviene saber:
+
+- **El repo se agrega sin pisar el oficial.** El `POST /Repositories` de Jellyfin
+  **reemplaza** la lista entera en vez de agregar: mandar solo el repo nuevo te
+  deja sin el catálogo oficial, que es de donde sale todo lo demás. El script lee
+  la lista y la manda completa.
+- **Reinicia Jellyfin al terminar.** Un plugin recién instalado queda inerte
+  hasta que eso pasa. Reinicia el **proceso**, no el contenedor: en la imagen de
+  LinuxServer lo vuelve a levantar s6 en el lugar (vuelve en unos segundos). Por
+  eso los plugins van al final del paso.
+- **La espera es por disco, no por la API.** Un plugin recién bajado aparece en
+  `/Plugins` sólo si el servidor pudo cargarlo en caliente; Moonbase no puede
+  (su `targetAbi` es de una versión anterior) y queda invisible ahí hasta el
+  reinicio, aunque la instalación haya salido perfecta. El script espera el
+  `meta.json` que Jellyfin escribe al final del desempaquetado.
+- **Verificá el estado final.** Jellyfin instala un plugin aunque su `targetAbi`
+  sea viejo, y el problema recién aparece al cargarlo. El script imprime el
+  estado de cada uno: **`Active`** es el único que significa que anduvo
+  (`Malfunctioned` o `NotSupported` = instalado y muerto). Moonbase 2.2.0.0
+  declara `targetAbi` 10.10 y aun así queda `Active` en Jellyfin 12.
 
 ### Aviso de Radarr/Sonarr al importar
 
@@ -314,6 +410,76 @@ de Jellyfin (detalle en [configs/README.md](configs/README.md)):
 docker exec fail2ban fail2ban-regex \
     /remotelogs/jellyfin/<archivo>.log /config/fail2ban/filter.d/jellyfin.conf
 ```
+
+---
+
+## Paso 6.7 — Seerr: el front de pedidos
+
+**Ya lo configura el orquestador** (paso 12). No hay nada que cargar en el
+`.env`: usa las **mismas credenciales de Jellyfin** que el paso 11.
+
+> **Se llama Seerr, no Jellyseerr.** Overseerr y Jellyseerr se fusionaron en un
+> solo proyecto (`ghcr.io/seerr-team/seerr`) y las imágenes viejas quedaron sin
+> mantenimiento. La API sigue siendo `/api/v1/*`, así que la documentación vieja
+> *parece* válida y no lo es.
+
+Qué deja hecho:
+
+| Qué | Cómo |
+|-----|------|
+| Usuario admin | El mismo de Jellyfin: entrás con esas credenciales |
+| Enlace con Jellyfin | `http://jellyfin:8096`, por la red interna |
+| Librerías | Las sincroniza y las prende todas |
+| Radarr / Sonarr | Como destino de los pedidos, con el quality profile de Recyclarr |
+
+### Por qué el admin se crea logueándose contra Jellyfin
+
+Seerr genera una API key sola en el primer arranque y la deja en su
+`settings.json`, pero **esa key no alcanza para configurarlo de cero**: el
+middleware que la valida la traduce al *usuario 1*, y en una instalación nueva
+ese usuario todavía no existe. Resultado: la key resuelve a nadie y todos los
+endpoints de settings contestan **403**.
+
+El único endpoint abierto es `POST /auth/jellyfin`, y está abierto justo para
+esto: si la base no tiene usuarios, crea al primero como admin. De paso deja
+enlazado Jellyfin, porque para loguearte necesita saber a qué servidor pegarle.
+Una sola llamada resuelve las dos cosas; de ahí en adelante va todo por la API
+key. Seerr además se crea su propia key **del lado de Jellyfin**, que aparece en
+el Dashboard como `Seerr`.
+
+Por eso, sin `JELLYFIN_USER` y `JELLYFIN_PASSWORD` el paso se saltea con un
+aviso. El usuario tiene que ser **administrador en Jellyfin**: si no lo es, la
+creación falla con 403.
+
+### El quality profile sale de Recyclarr
+
+Seerr guarda el perfil por **ID**, no por nombre, y esos IDs son de cada
+instancia de Radarr/Sonarr: hay que preguntárselos. El script usa el endpoint
+`/test` (que además de validar la conexión devuelve perfiles y root folders) y
+elige **el mismo perfil que aplica Recyclarr** — el de `.recyclarr` en
+`services_setup.conf`. Sin eso, Seerr pediría con un perfil que nadie afina.
+
+Si el perfil no está (típicamente porque el paso de Recyclarr no corrió), avisa
+y cae al primero de la lista.
+
+### Lo configurable
+
+En `.seerr` de `services_setup.conf`:
+
+| Clave | Default | Qué hace |
+|-------|---------|----------|
+| `adminEmail` | `""` | Email del admin. Vacío = usa el usuario de Jellyfin |
+| `radarr.minimumAvailability` | `released` | Cuándo Radarr empieza a buscar una peli pedida |
+| `sonarr.seasonFolders` | `true` | Carpeta por temporada en las series pedidas |
+
+### Lo que no hace
+
+- **No lo expone a internet.** Queda solo en el tailnet, como el resto de los
+  paneles: lo único que sale por el puerto 80 es Jellyfin. Si querés que tus
+  usuarios pidan contenido sin entrar a la tailnet, hay que agregarle un
+  `server` en nginx — es una decisión de exposición, no un olvido.
+- **No toca las librerías si ya elegiste vos.** Si prendiste o apagaste alguna a
+  mano, las corridas siguientes respetan esa elección.
 
 ---
 

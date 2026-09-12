@@ -9,10 +9,22 @@
 #  como uid $PUID) no pueden escribir ahi. Creandolas nosotros primero, con el
 #  dueño correcto, Docker nunca tiene que inventar nada.
 #
-#  /srv/config no hace falta chownearlo: las imagenes de linuxserver arrancan
-#  como root y ajustan el dueño de su propio /config al iniciar. /data NO lo
-#  tocan (y esta bien: no queres un chown recursivo de tu biblioteca en cada
-#  arranque), por eso el media tree es cosa nuestra.
+#  Las imagenes de linuxserver arrancan como root y ajustan el dueño de su
+#  propio /config al iniciar, asi que para ellas el dueño de la carpeta da
+#  igual. /data NO lo tocan (y esta bien: no queres un chown recursivo de tu
+#  biblioteca en cada arranque), por eso el media tree es cosa nuestra.
+#
+#  LAS QUE NO SON DE LINUXSERVER SI NECESITAN EL DUEÑO PUESTO DE ENTRADA, y
+#  Seerr ademas no perdona: corre como uid 1000 sin poder elevarse, no chownea
+#  nada, y si /app/config le llega de root muere en el arranque con EACCES al
+#  crear su carpeta de logs. Con 'restart: unless-stopped' eso es un contenedor
+#  reiniciandose para siempre. Por eso el dueño se ajusta aca, ANTES del
+#  compose up, y no mas tarde: despues ya no hay contenedor vivo al que
+#  arreglarle nada.
+#
+#  El chown de cada carpeta de la lista es DE LA CARPETA EN SI, no recursivo:
+#  alcanza para que el servicio pueda escribir adentro y no toca lo que cada
+#  app haya armado abajo (ni la biblioteca, que se maneja aparte mas abajo).
 # =========================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -26,6 +38,10 @@ for d in "$@"; do
     if [[ ! -d "$d" ]]; then
         info "Creando $d"
         mkdir -p "$d" || die "No pude crear $d"
+    fi
+    if [[ "$(stat -c '%u:%g' "$d")" != "${PUID}:${PGID}" ]]; then
+        info "Ajustando dueño de $d -> ${PUID}:${PGID}"
+        chown "${PUID}:${PGID}" "$d" || die "Fallo el chown de $d"
     fi
 done
 
