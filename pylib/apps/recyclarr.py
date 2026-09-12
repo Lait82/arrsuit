@@ -36,27 +36,47 @@ class Recyclarr:
         self.cfg = cfg
         self.template = repo_root / "configs" / "recyclarr" / "recyclarr.yml.tmpl"
 
-    def _service_conf(self, service: str) -> tuple[str, str, str]:
-        """Devuelve (trash_id del perfil, nombre del perfil, bloque YAML de CF groups)."""
+    def _service_conf(self, service: str) -> tuple[str, str, str, str]:
+        """Devuelve (trash_id del perfil, nombre, bloque de CF groups, bloque de CFs)."""
         profile = self.cfg.get("recyclarr", service, "qualityProfile")
         groups = self.cfg.get(
             "recyclarr", service, "customFormatGroups", default=[], required=False
+        )
+        formats = self.cfg.get(
+            "recyclarr", service, "customFormats", default=[], required=False
         )
 
         # Sin grupos, 'add:' quedaria vacio y el YAML seria invalido. Se emite
         # una lista vacia explicita para que siga parseando.
         if groups:
-            block = "\n".join(
+            group_block = "\n".join(
                 f"        - trash_id: {g['trashId']}   # {g['name']}" for g in groups
             )
         else:
-            block = "        []"
+            group_block = "        []"
 
-        return profile["trashId"], profile["name"], block
+        # El perfil se referencia por nombre y no por trash_id: un mismo trash_id
+        # puede cubrir varias variantes de un perfil, y ahi Recyclarr rechaza la
+        # referencia por ambigua.
+        if formats:
+            lines = []
+            for fmt in formats:
+                lines += [
+                    "      - trash_ids:",
+                    f"          - {fmt['trashId']}   # {fmt['name']}",
+                    "        assign_scores_to:",
+                    f"          - name: \"{profile['name']}\"",
+                    f"            score: {fmt['score']}",
+                ]
+            format_block = "\n".join(lines)
+        else:
+            format_block = "      []"
+
+        return profile["trashId"], profile["name"], group_block, format_block
 
     def render(self, radarr, sonarr) -> str:
-        radarr_id, radarr_name, radarr_groups = self._service_conf("radarr")
-        sonarr_id, sonarr_name, sonarr_groups = self._service_conf("sonarr")
+        radarr_id, radarr_name, radarr_groups, radarr_formats = self._service_conf("radarr")
+        sonarr_id, sonarr_name, sonarr_groups, sonarr_formats = self._service_conf("sonarr")
 
         ui.detail(f"Radarr : {radarr_name}")
         ui.detail(f"Sonarr : {sonarr_name}")
@@ -69,11 +89,13 @@ class Recyclarr:
             "{{RADARR_PROFILE_ID}}": radarr_id,
             "{{RADARR_PROFILE_NAME}}": radarr_name,
             "{{RADARR_CF_GROUPS}}": radarr_groups,
+            "{{RADARR_CUSTOM_FORMATS}}": radarr_formats,
             "{{SONARR_URL}}": sonarr.internal_url,
             "{{SONARR_API_KEY}}": sonarr.api_key,
             "{{SONARR_PROFILE_ID}}": sonarr_id,
             "{{SONARR_PROFILE_NAME}}": sonarr_name,
             "{{SONARR_CF_GROUPS}}": sonarr_groups,
+            "{{SONARR_CUSTOM_FORMATS}}": sonarr_formats,
         }
 
         text = self.template.read_text()

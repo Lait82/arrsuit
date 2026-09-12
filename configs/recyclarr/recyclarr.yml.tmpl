@@ -8,11 +8,13 @@
 #  el orquestador.
 #
 #  QUE HACE RECYCLARR: baja las TRaSH Guides y las aplica a Radarr y Sonarr.
-#  Concretamente sincroniza tres cosas:
+#  Concretamente sincroniza cuatro cosas:
 #    - quality_definition -> los tamanios min/max por calidad
 #    - quality_profiles   -> el perfil en si (que calidades acepta y en que
 #                            orden), traido del guide por su trash_id
 #    - custom_format_groups -> los custom formats y sus puntajes
+#    - custom_formats     -> custom formats sueltos con un puntaje propio, para
+#                            lo que el guide no puntua como uno quiere
 #
 #  base_url usa el nombre del contenedor y no la IP de Tailscale: recyclarr
 #  vive en la red 'media' y le llega a los otros por DNS interno de Docker.
@@ -42,6 +44,9 @@ radarr:
       add:
 {{RADARR_CF_GROUPS}}
 
+    custom_formats:
+{{RADARR_CUSTOM_FORMATS}}
+
 sonarr:
   series:
     base_url: {{SONARR_URL}}
@@ -58,3 +63,9 @@ sonarr:
     custom_format_groups:
       add:
 {{SONARR_CF_GROUPS}}
+
+    # Los puntajes de aca conviven con los de los grupos: 'reset_unmatched_scores'
+    # solo pone en cero los custom formats que NO aparecen en ningun trash_ids de
+    # esta config, y estos aparecen.
+    custom_formats:
+{{SONARR_CUSTOM_FORMATS}}

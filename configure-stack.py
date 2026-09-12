@@ -23,6 +23,10 @@
 #  paso chequea antes de actuar, asi que una segunda pasada no reinstala
 #  paquetes ni reconstruye el firewall.
 #
+#  Tampoco actualiza las imagenes de docker: solo baja las que falten. Con
+#  --update si las lleva a la ultima, que es el unico tramo lento y el unico
+#  que recrea contenedores que ya venian andando.
+#
 #  EL UNICO PUNTO DONDE PUEDE FRENAR es el paso 1, si Tailscale todavia no esta
 #  autenticado: eso abre una URL en el navegador y no se automatiza. Autenticas
 #  y volves a correr esto mismo.
@@ -35,6 +39,7 @@
 #  >>> Requiere: docker, python3. Corre con sudo (toca el host y docker).
 # =========================================================================
 
+import argparse
 import os
 import sys
 import tempfile
@@ -61,7 +66,22 @@ def check_prereqs() -> None:
         sys.exit(1)
 
 
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Orquesta y configura el media stack de punta a punta.",
+    )
+    ap.add_argument(
+        "--update",
+        action="store_true",
+        help="actualiza las imagenes de docker a la ultima version. Sin esto "
+             "solo se bajan las que falten, que es lo que hace rapida la "
+             "corrida normal.",
+    )
+    return ap.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     check_prereqs()
     ui.init_log(REPO_ROOT / "configure-stack.log", TOTAL_STEPS)
 
@@ -129,7 +149,12 @@ def main() -> int:
 
     # -- 4 ----------------------------------------------------------------
     ui.step("Levantando el stack")
-    sh.run_script(SYS_SCRIPTS / "compose-up.sh", REPO_ROOT, *edge.compose_profiles)
+    sh.run_script(
+        SYS_SCRIPTS / "compose-up.sh",
+        REPO_ROOT,
+        *(["--update"] if args.update else []),
+        *edge.compose_profiles,
+    )
     if edge_changed:
         # Solo para los que ya estaban corriendo: al resto los acaba de crear
         # el compose con la config nueva.

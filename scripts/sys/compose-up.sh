@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =========================================================================
-#  scripts/sys/compose-up.sh <repo_root> [perfil...]
+#  scripts/sys/compose-up.sh <repo_root> [--update] [perfil...]
 #
 #  Sincroniza el stack con el compose.
 #
@@ -12,16 +12,28 @@
 #  (el contenedor geoipupdate), que solo se levanta si hay credenciales de
 #  MaxMind: sin ellas la imagen sale con error y quedaria reiniciandose.
 #
-#  EL PULL VA APARTE del 'up -d', DE A UNA IMAGEN y con reintentos. El pull es
-#  el unico tramo que sale a internet y el que se cae: las capas de casi todo
-#  el stack salen del CDN de GitHub (lscr.io es un alias de ghcr.io) y esa
-#  descarga muere con 'connection reset by peer'.
+#  EL PULL VA APARTE del 'up -d' y por defecto SOLO BAJA LO QUE FALTA
+#  ('--policy missing'). Casi todo el compose apunta a ':latest' y linuxserver
+#  rebuildea sus imagenes seguido, asi que con la politica por defecto de
+#  docker ('always') cada corrida encontraba digests nuevos y se bajaba medio
+#  stack, aunque se viniera a tocar una sola config. Un servicio nuevo en el
+#  compose entra igual: no esta en el cache local, y 'missing' lo baja.
+#
+#  Con --update la politica pasa a 'always' y actualiza a la ultima. Ese es el
+#  unico tramo que sale a internet y el que se cae: las capas de casi todo el
+#  stack salen del CDN de GitHub (lscr.io es un alias de ghcr.io) y esa
+#  descarga muere con 'connection reset by peer'. De ahi el pull de a una
+#  imagen y con reintentos.
 #
 #  De a una y no todas juntas por como reacciona compose al fallo: cuando una
 #  descarga se corta, cancela las demas ('Interrupted') y se pierde lo que
 #  estaban bajando. Servicio por servicio, un corte se lleva puesta una sola
-#  imagen y el resto queda en el cache local. Con eso el reintento siempre
-#  avanza, y las capas a medio bajar tambien quedan cacheadas.
+#  imagen y el resto queda en el cache local.
+#
+#  OJO CON EL ALCANCE DE ESE CACHE: docker guarda capas COMPLETAS, no descargas
+#  a medias. Un corte a los 80MB de una capa de 960MB (tdarr tiene una) tira
+#  esos 80MB y el reintento arranca de cero. El reintento avanza de a capas
+#  enteras, nunca dentro de una.
 # =========================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -29,6 +41,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 PULL_RETRIES=3
 
 REPO_ROOT="${1:?falta el repo_root}"; shift
+
+# El flag va antes de los perfiles: los perfiles son posicionales sueltos, asi
+# que si viniera al final no habria como distinguirlo de uno.
+PULL_POLICY=missing
+if [[ "${1:-}" == "--update" ]]; then
+    PULL_POLICY=always
+    shift
+fi
+
 cd "$REPO_ROOT" || die "No pude entrar a $REPO_ROOT"
 
 DC="$(detect_compose)"
@@ -45,11 +66,15 @@ fi
 mapfile -t SERVICES < <($DC "${PROFILE_ARGS[@]}" config --services)
 (( ${#SERVICES[@]} > 0 )) || die "El compose no declara ningun servicio."
 
-info "Bajando las imagenes que falten (${#SERVICES[@]} servicios, de a uno)..."
+if [[ "$PULL_POLICY" == always ]]; then
+    info "Actualizando las imagenes a la ultima (${#SERVICES[@]} servicios, de a uno)..."
+else
+    info "Bajando las imagenes que falten (${#SERVICES[@]} servicios, de a uno)..."
+fi
 failed=()
 for svc in "${SERVICES[@]}"; do
     for attempt in $(seq 1 "$PULL_RETRIES"); do
-        if $DC "${PROFILE_ARGS[@]}" pull "$svc"; then
+        if $DC "${PROFILE_ARGS[@]}" pull --policy "$PULL_POLICY" "$svc"; then
             break
         fi
         if (( attempt == PULL_RETRIES )); then
