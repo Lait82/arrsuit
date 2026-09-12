@@ -322,30 +322,30 @@ services:
       retries: 3
     restart: unless-stopped
 
-  # -----------------------------------------------------------------------
-  # Tdarr - normalizacion de biblioteca (SOLO audio DTS->AC3 para tu Samsung)
-  # -----------------------------------------------------------------------
-  tdarr:
-    image: ghcr.io/haveagitgat/tdarr:latest
-    container_name: tdarr
-    networks: [media]
-    ports:
-      - "${TAILSCALE_IP}:8265:8265"   # WebUI - solo Tailscale
-      - "${TAILSCALE_IP}:8266:8266"   # server port (nodos) - solo Tailscale
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/Argentina/Buenos_Aires
-      - internalNode=true
-      - inContainer=true
-      - nodeName=vps-node
-    volumes:
-      - /srv/config/tdarr/server:/app/server
-      - /srv/config/tdarr/configs:/app/configs
-      - /srv/config/tdarr/logs:/app/logs
-      - /srv/media:/data
-      - /srv/config/tdarr/transcode_cache:/temp
-    restart: unless-stopped
+  # # -----------------------------------------------------------------------
+  # # Tdarr - normalizacion de biblioteca (SOLO audio DTS->AC3 para tu Samsung)
+  # # -----------------------------------------------------------------------
+  # tdarr:
+  #   image: ghcr.io/haveagitgat/tdarr:latest
+  #   container_name: tdarr
+  #   networks: [media]
+  #   ports:
+  #     - "${TAILSCALE_IP}:8265:8265"   # WebUI - solo Tailscale
+  #     - "${TAILSCALE_IP}:8266:8266"   # server port (nodos) - solo Tailscale
+  #   environment:
+  #     - PUID=1000
+  #     - PGID=1000
+  #     - TZ=America/Argentina/Buenos_Aires
+  #     - internalNode=true
+  #     - inContainer=true
+  #     - nodeName=vps-node
+  #   volumes:
+  #     - /srv/config/tdarr/server:/app/server
+  #     - /srv/config/tdarr/configs:/app/configs
+  #     - /srv/config/tdarr/logs:/app/logs
+  #     - /srv/media:/data
+  #     - /srv/config/tdarr/transcode_cache:/temp
+  #   restart: unless-stopped
 
   # -----------------------------------------------------------------------
   # Recyclarr - sincroniza custom formats / quality profiles (TRaSH Guides)
